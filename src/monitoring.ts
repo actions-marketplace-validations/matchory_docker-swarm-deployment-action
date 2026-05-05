@@ -1,10 +1,18 @@
 import * as core from "@actions/core";
+import type { ComposeSpec } from "./compose.js";
 import {
   getServiceLogs,
   listServices,
+  listServiceTasks,
   type Service,
   type ServiceWithMetadata,
+  type TaskStatus,
 } from "./engine.js";
+import {
+  findServiceHealthCheck,
+  formatHealthCheck,
+  type HealthCheck,
+} from "./healthcheck.js";
 import type { Settings } from "./settings.js";
 import { sleep } from "./utils.js";
 
@@ -18,7 +26,10 @@ import { sleep } from "./utils.js";
  *
  * @param settings Deployment settings
  */
-export async function monitorDeployment(settings: Readonly<Settings>) {
+export async function monitorDeployment(
+  settings: Readonly<Settings>,
+  spec?: ComposeSpec,
+) {
   if (!settings.monitor) {
     core.info("Post-Deployment Monitoring is disabled");
 
@@ -28,18 +39,71 @@ export async function monitorDeployment(settings: Readonly<Settings>) {
   core.info(`Monitoring Stack "${settings.stack}" for Post-Deployment Issues`);
 
   const startTime = new Date();
-  let attemptsLeft = Math.ceil(
-    settings.monitorTimeout / settings.monitorInterval,
+  const baseInterval = settings.monitorInterval * 1_000;
+  const maxInterval = Math.min(
+    baseInterval * 6,
+    settings.monitorTimeout * 1_000,
   );
+  let currentInterval = baseInterval;
   const completedServices = new Set<string>();
-  let services: ServiceWithMetadata[];
+  let services: ServiceWithMetadata[] = [];
 
   do {
-    if (--attemptsLeft <= 0) {
-      throw new Error("Deployment timed out");
-    }
+    const elapsed = Date.now() - startTime.getTime();
 
-    await sleep(settings.monitorInterval * 1_000);
+    if (elapsed >= settings.monitorTimeout * 1_000) {
+      // On timeout, report diagnostics for all non-converged services.
+      // Prefetch tasks in parallel, then build reports sequentially to
+      // avoid interleaving job summary output.
+      const pendingOnTimeout = services.filter(
+        (s) => !completedServices.has(s.ID),
+      );
+      const prefetchedTasks = await Promise.all(
+        pendingOnTimeout.map((s) => fetchTasks(s.ID)),
+      );
+      for (let i = 0; i < pendingOnTimeout.length; i++) {
+        const service = pendingOnTimeout[i];
+        const name = service.Spec?.Name ?? service.Name ?? service.ID;
+        const healthcheck = findServiceHealthCheck(spec, name);
+        await buildFailureReport(
+          service.ID,
+          name,
+          startTime,
+          prefetchedTasks[i] ?? undefined,
+          healthcheck,
+        );
+      }
+
+      const convergedNames = services
+        .filter((s) => completedServices.has(s.ID))
+        .map((s) => s.Spec?.Name ?? s.Name ?? s.ID);
+      const pendingNames = services
+        .filter((s) => !completedServices.has(s.ID))
+        .map((s) => s.Spec?.Name ?? s.Name ?? s.ID);
+
+      // Job summary table for partial success
+      core.summary.addHeading("Deployment timeout summary", 2);
+      core.summary.addTable([
+        [
+          { data: "Service", header: true },
+          { data: "Status", header: true },
+        ],
+        ...convergedNames.map((n) => [{ data: n }, { data: "Converged" }]),
+        ...pendingNames.map((n) => [{ data: n }, { data: "Pending" }]),
+      ]);
+
+      if (convergedNames.length > 0) {
+        core.info(`Services converged: ${convergedNames.join(", ")}`);
+      }
+
+      if (pendingNames.length > 0) {
+        core.error(`Services not converged: ${pendingNames.join(", ")}`);
+      }
+
+      throw new Error(
+        `Deployment timed out: ${completedServices.size}/${services.length} services converged`,
+      );
+    }
 
     services = await listServices(
       { labels: { "com.docker.stack.namespace": settings.stack } },
@@ -51,63 +115,114 @@ export async function monitorDeployment(settings: Readonly<Settings>) {
         `${completedServices.size}/${services.length}`,
     );
 
-    for (const service of services) {
-      if (completedServices.has(service.ID)) {
-        continue;
-      }
+    const previousSize = completedServices.size;
 
-      const serviceIdentifier =
-        service.Spec?.Name ?? service.Name ?? service.ID;
-      let complete: boolean;
+    type CheckResult =
+      | { kind: "complete" }
+      | { kind: "pending" }
+      | { kind: "stuck"; tasks: TaskStatus[] }
+      | { kind: "update_failed"; error: unknown };
 
-      try {
-        complete = isServiceUpdateComplete(service);
-      } catch (error) {
-        const logs = await getServiceLogs(service.ID, { since: startTime });
-        const message = error instanceof Error ? error.message : String(error);
+    // Check all pending services in parallel: fetch tasks concurrently
+    // instead of sequentially, which matters most when many services are
+    // still updating and each `docker service ps` call takes ~100-500ms.
+    const pendingServices = services.filter(
+      (s) => !completedServices.has(s.ID),
+    );
+    const checks: Array<[ServiceWithMetadata, CheckResult]> = await Promise.all(
+      pendingServices.map(
+        async (service): Promise<[ServiceWithMetadata, CheckResult]> => {
+          let complete: boolean;
+          try {
+            complete = isServiceUpdateComplete(service);
+          } catch (error) {
+            return [service, { kind: "update_failed", error }];
+          }
 
-        core.error(
-          new Error(
-            `Service "${serviceIdentifier}" failed to update: ${message}`,
-            { cause: error },
-          ),
-        );
-        core.error(`Service Details:\n${JSON.stringify(service, null, 2)}`);
-        core.setOutput("service-logs", logs.toString());
-        core.summary.addHeading("Service Logs", 2);
-        core.summary.addRaw(
-          `Before the "${serviceIdentifier}" service update failed, the following logs were generated:`,
-          true,
-        );
-        core.summary.addTable([
-          [
-            { data: "timestamp", header: true },
-            { data: "message", header: true },
-            ...(logs[0]
-              ? Object.keys(logs[0].metadata).map((key) => ({
-                  data: key,
-                  header: true,
-                }))
-              : []),
-          ],
-          ...logs.map((entry) => [
-            { data: entry.timestamp?.toISOString() ?? "<no timestamp>" },
-            { data: entry.message },
-            ...(entry.metadata
-              ? Object.values(entry.metadata).map((value) => ({ data: value }))
-              : []),
-          ]),
-        ]);
+          if (complete) {
+            return [service, { kind: "complete" }];
+          }
 
-        throw error;
-      }
+          // If the service appears to be "updating" but all tasks are in a
+          // terminal failure state, it will never recover — fail early instead
+          // of waiting for the full timeout.
+          const tasks = await fetchTasks(service.ID);
+          if (tasks && isServiceStuck(tasks)) {
+            return [service, { kind: "stuck", tasks }];
+          }
 
-      if (complete) {
-        core.info(
-          `Service "${serviceIdentifier}" has been deployed successfully`,
-        );
+          return [service, { kind: "pending" }];
+        },
+      ),
+    );
+
+    // Process completions first
+    for (const [service, result] of checks) {
+      if (result.kind === "complete") {
+        const name = service.Spec?.Name ?? service.Name ?? service.ID;
+        core.info(`Service "${name}" has been deployed successfully`);
         completedServices.add(service.ID);
       }
+    }
+
+    // Build failure reports sequentially to avoid interleaving job summary
+    // output, but only after all parallel checks have finished so we can
+    // report every failing service rather than stopping at the first one.
+    type Failure = [
+      ServiceWithMetadata,
+      (
+        | { kind: "stuck"; tasks: TaskStatus[] }
+        | { kind: "update_failed"; error: unknown }
+      ),
+    ];
+    const failures = checks.filter(
+      (entry): entry is Failure =>
+        entry[1].kind === "stuck" || entry[1].kind === "update_failed",
+    );
+    if (failures.length > 0) {
+      for (const [service, result] of failures) {
+        const name = service.Spec?.Name ?? service.Name ?? service.ID;
+        const healthcheck = findServiceHealthCheck(spec, name);
+        if (result.kind === "stuck") {
+          await buildFailureReport(
+            service.ID,
+            name,
+            startTime,
+            result.tasks,
+            healthcheck,
+          );
+        } else {
+          await buildFailureReport(
+            service.ID,
+            name,
+            startTime,
+            undefined,
+            healthcheck,
+          );
+          core.error(`Service Details:\n${JSON.stringify(service, null, 2)}`);
+        }
+      }
+
+      const [firstService, firstResult] = failures[0];
+      const firstName =
+        firstService.Spec?.Name ?? firstService.Name ?? firstService.ID;
+      if (firstResult.kind === "stuck") {
+        throw new Error(
+          `Service "${firstName}" failed: all tasks are in a failed state`,
+        );
+      }
+      throw firstResult.error as Error;
+    }
+
+    // Reset interval if progress was made, otherwise grow with backoff
+    if (completedServices.size > previousSize) {
+      currentInterval = baseInterval;
+    } else {
+      currentInterval = Math.min(currentInterval * 1.5, maxInterval);
+    }
+
+    if (completedServices.size < services.length) {
+      await sleep(currentInterval);
     }
   } while (completedServices.size < services.length);
 
@@ -212,6 +327,33 @@ export function isServiceRunning(
   return false;
 }
 
+async function fetchTasks(serviceId: string): Promise<TaskStatus[] | null> {
+  try {
+    return await listServiceTasks(serviceId);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Check if all tasks are in terminal failure states.
+ *
+ * When a service has tasks but every task has failed or been rejected
+ * (and none are running, pending, or being prepared), the service will
+ * never recover on its own.
+ */
+export function isServiceStuck(tasks: TaskStatus[]): boolean {
+  if (tasks.length === 0) {
+    return false;
+  }
+
+  return tasks.every(
+    (t) =>
+      t.CurrentState.startsWith("Failed") ||
+      t.CurrentState.startsWith("Rejected"),
+  );
+}
+
 /**
  * Resolve the failure reason for a service update
  *
@@ -248,4 +390,243 @@ function resolveFailureReason(
     }[state] ?? "Unknown failure reason";
 
   return reason + (message ? `: ${message}` : "");
+}
+
+/**
+ * Build a structured diagnostic report for a failed service update.
+ */
+export async function buildFailureReport(
+  serviceId: string,
+  serviceName: string,
+  startTime: Date,
+  prefetchedTasks?: TaskStatus[],
+  healthcheck?: HealthCheck,
+) {
+  const tasks = prefetchedTasks ?? (await fetchTasks(serviceId));
+
+  if (!tasks) {
+    core.error(`Failed to fetch task details for service "${serviceName}"`);
+    return;
+  }
+
+  if (tasks.length === 0) {
+    core.error(`No task information available for service "${serviceName}"`);
+    return;
+  }
+
+  const failedTasks = tasks.filter(
+    (t) => t.Error && t.DesiredState !== "Running",
+  );
+  const latestFailedTask = failedTasks[0];
+  const errorResult = latestFailedTask
+    ? categorizeTaskError(latestFailedTask.Error)
+    : undefined;
+  const headline = errorResult?.headline;
+
+  if (headline) {
+    core.error(`Service "${serviceName}" failed to deploy: ${headline}`);
+  } else {
+    core.error(
+      `Service "${serviceName}" failed to deploy (no task error details available)`,
+    );
+  }
+
+  if (errorResult?.category === "health_check" && healthcheck) {
+    core.error(
+      `Health check configuration for service "${serviceName}":\n` +
+        formatHealthCheck(healthcheck),
+    );
+  }
+
+  const history = tasks
+    .map((t) => {
+      const error = t.Error ? ` "${t.Error}"` : "";
+      return `  ${t.Name}  ${t.DesiredState.padEnd(10)}  ${t.CurrentState}${error}  (node: ${t.Node})`;
+    })
+    .join("\n");
+
+  core.error(`Task history for service "${serviceName}":\n${history}`);
+
+  let logs: Awaited<ReturnType<typeof getServiceLogs>>;
+
+  try {
+    logs = await getServiceLogs(serviceId, { since: startTime, tail: 50 });
+  } catch {
+    core.warning(`Failed to fetch container logs for service "${serviceName}"`);
+    logs = [];
+  }
+
+  const formattedLogs = logs.map((entry) => {
+    const ts = entry.timestamp?.toISOString() ?? "<no timestamp>";
+    return `${ts}  ${entry.message}`;
+  });
+
+  if (formattedLogs.length === 0) {
+    core.error(
+      `No container logs available for service "${serviceName}" (container may not have started)`,
+    );
+  } else {
+    const logOutput = formattedLogs.map((l) => `  ${l}`).join("\n");
+    core.setOutput("service-logs", logOutput);
+    core.error(`Container logs for service "${serviceName}":\n${logOutput}`);
+  }
+
+  // Job summary
+  core.summary.addHeading(`Deployment failure: ${serviceName}`, 2);
+
+  if (headline) {
+    core.summary.addRaw(`**Root cause:** ${headline}`, true);
+  }
+
+  if (errorResult?.category === "health_check" && healthcheck) {
+    core.summary.addHeading("Health check configuration", 3);
+    core.summary.addCodeBlock(formatHealthCheck(healthcheck));
+  }
+
+  core.summary.addHeading("Task history", 3);
+  core.summary.addTable([
+    [
+      { data: "Task", header: true },
+      { data: "State", header: true },
+      { data: "Current State", header: true },
+      { data: "Error", header: true },
+      { data: "Node", header: true },
+    ],
+    ...tasks.map((t) => [
+      { data: t.Name },
+      { data: t.DesiredState },
+      { data: t.CurrentState },
+      { data: t.Error || "-" },
+      { data: t.Node },
+    ]),
+  ]);
+
+  if (formattedLogs.length > 0) {
+    core.summary.addHeading("Container logs", 3);
+    core.summary.addCodeBlock(formattedLogs.join("\n"));
+  } else {
+    core.summary.addRaw(
+      "_No container logs available (container may not have started)_",
+      true,
+    );
+  }
+}
+
+export type ErrorCategory =
+  | "image_pull"
+  | "oom_kill"
+  | "container_crash"
+  | "health_check"
+  | "scheduling"
+  | "startup_failure"
+  | "network"
+  | "volume"
+  | "config"
+  | "dependency"
+  | "entrypoint"
+  | "port_conflict"
+  | "unknown";
+
+const errorPatterns: Array<{
+  test: (e: string) => boolean;
+  category: ErrorCategory;
+  headline: (e: string) => string;
+}> = [
+  {
+    test: (e) =>
+      /No such image|manifest unknown|manifest not found|pull access denied|unauthorized/.test(
+        e,
+      ),
+    category: "image_pull",
+    headline: (e) => `Image could not be pulled: ${e}`,
+  },
+  {
+    test: (e) => /non-zero exit \(137\)/.test(e),
+    category: "oom_kill",
+    headline: () => "Container killed (likely OOM): exit code 137",
+  },
+  {
+    test: (e) => /non-zero exit \((\d+)\)/.test(e),
+    category: "container_crash",
+    headline: (e) => {
+      const code = e.match(/non-zero exit \((\d+)\)/)?.[1] ?? "?";
+      return `Container exited with code ${code}`;
+    },
+  },
+  {
+    test: (e) => /unhealthy container/.test(e),
+    category: "health_check",
+    headline: () => "Container failed health check",
+  },
+  {
+    test: (e) => /no suitable node/.test(e),
+    category: "scheduling",
+    headline: (e) => `No node available to run this task: ${e}`,
+  },
+  {
+    test: (e) =>
+      /starting container failed|OCI runtime create failed/.test(e) &&
+      !/exec format error|permission denied|no such file or directory/.test(e),
+    category: "startup_failure",
+    headline: (e) => `Container failed to start: ${e}`,
+  },
+  {
+    test: (e) =>
+      /exec format error|(?:^|\W)permission denied|no such file or directory/.test(
+        e,
+      ),
+    category: "entrypoint",
+    headline: (e) => `Container entrypoint failed: ${e}`,
+  },
+  {
+    test: (e) =>
+      /failed to allocate network IP|Address already in use|missing network attachments/.test(
+        e,
+      ),
+    category: "network",
+    headline: (e) => `Network allocation failed: ${e}`,
+  },
+  {
+    test: (e) => /invalid bind mount source|no space left on device/.test(e),
+    category: "volume",
+    headline: (e) => `Volume or mount failed: ${e}`,
+  },
+  {
+    test: (e) =>
+      /secret reference|config reference|(?:secret|config)\S*\s+not found/.test(
+        e,
+      ),
+    category: "config",
+    headline: (e) => `Secret or config reference invalid: ${e}`,
+  },
+  {
+    test: (e) => /dependency not ready/.test(e),
+    category: "dependency",
+    headline: () => "Task dependencies not yet available",
+  },
+  {
+    test: (e) => /host-mode port already in use/.test(e),
+    category: "port_conflict",
+    headline: (e) => `Host port already in use: ${e}`,
+  },
+];
+
+export function categorizeTaskError(error: string): {
+  category: ErrorCategory;
+  headline: string;
+} {
+  if (!error) {
+    return { category: "unknown", headline: "Unknown error" };
+  }
+
+  for (const pattern of errorPatterns) {
+    if (pattern.test(error)) {
+      return {
+        category: pattern.category,
+        headline: pattern.headline(error),
+      };
+    }
+  }
+
+  return { category: "unknown", headline: error };
 }

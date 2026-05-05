@@ -1,7 +1,7 @@
 {
   "name": "@matchory/docker-swarm-deployment-action",
   "description": "A GitHub Action to deploy a Docker Swarm stack.",
-  "version": "0.11.0",
+  "version": "1.1.0",
   "author": {
     "name": "Moritz Friedrich",
     "email": "moritz@matchory.com",
@@ -27,18 +27,15 @@
   ],
   "main": "src/main.ts",
   "exports": {
-    ".": {
-      "import": "./out/index.mjs",
-      "require": "./out/index.cjs"
-    }
+    ".": "./src/main.ts"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=24"
   },
   "packageManager": "npm@10.9.2",
   "scripts": {
     "postversion": "npm run licensed && npm run all",
-    "bundle": "npx @vercel/ncc build out/index.cjs --source-map --license licenses.txt --minify --out dist --target es2022 --no-cache",
+    "bundle": "npx @vercel/ncc build src/index.ts --source-map --license licenses.txt --minify --out dist --target es2022 --no-cache",
     "ci-test": "npx vitest",
     "coverage": "npx make-coverage-badge --output-path ./badges/coverage.svg",
     "format:write": "npx @biomejs/biome check --write --unsafe",
@@ -46,28 +43,26 @@
     "lint": "npx @biomejs/biome lint",
     "licensed": "licensed cache",
     "local-action": "npx @github/local-action . src/main.ts .env",
-    "build": "npx unbuild --config build.config.ts",
-    "package": "npm run build && npm run bundle",
-    "package:watch": "npm run package -- --watch",
+    "package": "npm run bundle",
+    "typecheck": "npx tsc --noEmit",
     "test": "npx vitest --run",
-    "all": "npm run format:write && npm run lint && npm run test && npm run coverage && npm run package"
+    "all": "npm run format:write && npm run lint && npm run typecheck && npm run test && npm run coverage && npm run package"
   },
   "license": "MIT",
   "dependencies": {
-    "@actions/artifact": "^5.0.2",
-    "@actions/core": "^2.0.2",
+    "@actions/artifact": "^6.2.1",
+    "@actions/core": "^3.0.0",
+    "@actions/exec": "^3.0.0",
     "js-yaml": "^4.1.1"
   },
   "devDependencies": {
-    "@biomejs/biome": "2.3.11",
+    "@biomejs/biome": "2.4.8",
     "@types/js-yaml": "^4.0.9",
-    "@types/node": "^20.19.28",
-    "@vitest/coverage-v8": "^4.0.16",
-    "globals": "^17.0.0",
+    "@types/node": "^24.12.0",
+    "@vitest/coverage-v8": "^4.1.0",
+    "globals": "^17.4.0",
     "make-coverage-badge": "^1.2.0",
-    "rollup": "^4.55.1",
     "typescript": "^5.9.3",
-    "unbuild": "^3.6.1",
     "vitest": "^4.0.6"
   }
 }

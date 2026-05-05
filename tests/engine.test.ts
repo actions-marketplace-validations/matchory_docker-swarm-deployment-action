@@ -82,95 +82,6 @@ describe("engine", () => {
     });
   });
 
-  describe("normalizeComposeSpecification", () => {
-    const composeFiles = ["docker-compose.yml", "docker-compose.override.yml"];
-
-    it("should call docker compose config and parse JSON", async () => {
-      const mockOutput = JSON.stringify({
-        services: { app: { image: "test" } },
-      });
-      mockedExec.mockImplementation(async (_0, _1, options) => {
-        if (options?.listeners?.stdout) {
-          options.listeners.stdout(Buffer.from(mockOutput));
-        }
-        return 0;
-      });
-
-      const result = await engine.normalizeComposeSpecification(
-        composeFiles,
-        settings,
-      );
-
-      expect(mockedExec).toHaveBeenCalledWith(
-        "docker",
-        [
-          "compose",
-          "config",
-          "--compose-file=docker-compose.yml",
-          "--compose-file=docker-compose.override.yml",
-          "--format=json",
-        ],
-        expect.any(Object),
-      );
-      expect(result).toEqual({ services: { app: { image: "test" } } });
-    });
-
-    it("should allow to skip interpolation", async () => {
-      mockedExec.mockImplementationOnce(async (_0, _1, options) => {
-        options?.listeners?.stdout?.(Buffer.from("{}"));
-
-        return 0;
-      });
-      await engine.normalizeComposeSpecification(composeFiles, settings, true);
-      expect(mockedExec).toHaveBeenCalledWith(
-        "docker",
-        expect.arrayContaining(["--no-interpolate"]),
-        expect.any(Object),
-      );
-    });
-
-    it("should handle --resolve-image-digests flag", async () => {
-      mockedExec.mockImplementationOnce(async (_0, _1, options) => {
-        options?.listeners?.stdout?.(Buffer.from("{}"));
-
-        return 0;
-      });
-      await engine.normalizeComposeSpecification(
-        composeFiles,
-        settings,
-        false,
-        true,
-      );
-      expect(mockedExec).toHaveBeenCalledWith(
-        "docker",
-        expect.arrayContaining(["--resolve-image-digests"]),
-        expect.any(Object),
-      );
-    });
-
-    it("should throw error on empty output", async () => {
-      mockedExec.mockImplementation(async (_0, _1, options) => {
-        options?.listeners?.stdout?.(Buffer.from("")); // Empty output
-
-        return 0;
-      });
-      await expect(
-        engine.normalizeComposeSpecification(composeFiles, settings),
-      ).rejects.toThrowError(/No content produced/);
-    });
-
-    it("should throw error on invalid JSON", async () => {
-      mockedExec.mockImplementation(async (_0, _1, options) => {
-        options?.listeners?.stdout?.(Buffer.from("invalid json"));
-
-        return 0;
-      });
-      await expect(
-        engine.normalizeComposeSpecification(composeFiles, settings),
-      ).rejects.toThrowError(/Failed to parse JSON output/);
-    });
-  });
-
   describe("normalizeStackSpecification", () => {
     const composeFiles = ["docker-compose.yml"];
 
@@ -371,7 +282,7 @@ services:
   describe("getServiceLogs", () => {
     it("should get service logs and parse them", async () => {
       const timestamp = new Date().toISOString();
-      const mockOutput = `${timestamp} com.docker.swarm.node.id=foo,com.docker.swarm.service.id=bar INFO Some log message`;
+      const mockOutput = `${timestamp} INFO Some log message`;
       mockedExec.mockImplementation(async (_0, _1, options) => {
         options?.listeners?.stdout?.(Buffer.from(mockOutput));
         return 0;
@@ -386,7 +297,6 @@ services:
           "logs",
           "--raw",
           "--no-trunc",
-          "--details",
           "--timestamps",
           "--tail=10",
           "abc",
@@ -396,10 +306,6 @@ services:
       expect(logs).toHaveLength(1);
       expect(logs[0]).toEqual({
         timestamp: new Date(timestamp),
-        metadata: {
-          "com.docker.swarm.node.id": "foo",
-          "com.docker.swarm.service.id": "bar",
-        },
         message: "INFO Some log message",
       });
     });
@@ -417,7 +323,7 @@ services:
     });
 
     it("should handle invalid timestamps in log lines", async () => {
-      const mockOutput = `invalid-timestamp foo=bar Some log message`;
+      const mockOutput = `invalid-timestamp Some log message`;
       mockedExec.mockImplementation(async (_0, _1, options) => {
         options?.listeners?.stdout?.(Buffer.from(mockOutput));
         return 0;
@@ -428,7 +334,6 @@ services:
       expect(logs).toHaveLength(1);
       expect(logs[0]).toEqual({
         timestamp: null,
-        metadata: { foo: "bar" },
         message: "Some log message",
       });
       expect(mockedCore.warning).toHaveBeenCalledWith(
@@ -451,6 +356,77 @@ services:
       mockedExec.mockRejectedValue(new Error("Docker error"));
       await expect(engine.getServiceLogs("abc", {})).rejects.toThrowError(
         /Failed to get logs for service/,
+      );
+    });
+  });
+
+  describe("listServiceTasks", () => {
+    it("should list tasks for a service and parse JSON", async () => {
+      const mockTask = {
+        ID: "task1",
+        Name: "api.1",
+        Image: "registry/api:v2",
+        Node: "worker-1",
+        DesiredState: "Shutdown",
+        CurrentState: "Failed 2 minutes ago",
+        Error: "task: non-zero exit (1)",
+        Ports: "",
+      };
+      mockedExec.mockImplementation(async (_0, _1, options) => {
+        options?.listeners?.stdout?.(
+          Buffer.from(`${JSON.stringify(mockTask)}\n`),
+        );
+        return 0;
+      });
+
+      const tasks = await engine.listServiceTasks("svc1");
+
+      expect(mockedExec).toHaveBeenCalledWith(
+        "docker",
+        ["service", "ps", "--format=json", "--no-trunc", "svc1"],
+        expect.any(Object),
+      );
+      expect(tasks).toEqual([mockTask]);
+    });
+
+    it("should return multiple tasks in order", async () => {
+      const task1 = {
+        ID: "t1",
+        Name: "api.1",
+        Image: "img",
+        Node: "n1",
+        DesiredState: "Shutdown",
+        CurrentState: "Failed 3 minutes ago",
+        Error: "task: non-zero exit (1)",
+        Ports: "",
+      };
+      const task2 = {
+        ID: "t2",
+        Name: "api.2",
+        Image: "img",
+        Node: "n2",
+        DesiredState: "Running",
+        CurrentState: "Running 1 minute ago",
+        Error: "",
+        Ports: "",
+      };
+      mockedExec.mockImplementation(async (_0, _1, options) => {
+        options?.listeners?.stdout?.(
+          Buffer.from(`${JSON.stringify(task1)}\n${JSON.stringify(task2)}\n`),
+        );
+        return 0;
+      });
+
+      const tasks = await engine.listServiceTasks("svc1");
+      expect(tasks).toHaveLength(2);
+      expect(tasks[0].ID).toBe("t1");
+      expect(tasks[1].ID).toBe("t2");
+    });
+
+    it("should throw error on exec failure", async () => {
+      mockedExec.mockRejectedValue(new Error("Docker error"));
+      await expect(engine.listServiceTasks("svc1")).rejects.toThrowError(
+        /Failed to list tasks/,
       );
     });
   });
@@ -604,7 +580,7 @@ services:
         throw new Error("docker error");
       });
       await expect(
-        engine.normalizeComposeSpecification(["docker-compose.yml"], settings),
+        engine.normalizeStackSpecification(["docker-compose.yml"], settings),
       ).rejects.toThrow(/docker error/);
     });
 

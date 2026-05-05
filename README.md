@@ -116,13 +116,14 @@ To configure the action, you can use the following inputs:
 | `env-var-prefix`   | `DEPLOYMENT_`                         | Prefix to resolve variables intended for [auto-configuration of variables](#smart-variable-resolution).                           |
 | `manage-variables` | `true`                                | Whether to automatically [manage configs and secrets](#configuring-secrets-and-configs).                                          |
 | `strict-variables` | `false`                               | Whether to throw an error if a variable specified in the compose spec is not defined.                                             |
-| `variables`        | _—_                                   | Variables as KEY=value pairs, newline-separated, or JSON object (e.g., `${{ toJSON(vars) }}`). Applies to environment.           |
-| `secrets`          | _—_                                   | Secrets as KEY=value pairs, newline-separated, or JSON object (e.g., `${{ toJSON(secrets) }}`). Higher priority than variables.  |
+| `variables`        | _—_                                   | Variables as KEY=value pairs, newline-separated, or JSON object (e.g., `${{ toJSON(vars) }}`). Applies to environment.            |
+| `secrets`          | _—_                                   | Secrets as KEY=value pairs, newline-separated, or JSON object (e.g., `${{ toJSON(secrets) }}`). Higher priority than variables.   |
 | `exclude-variables`| _—_                                   | List of variable names to exclude from deployment, separated by newlines. Applies to all variable sources.                        |
 | `extra-variables`  | _—_                                   | Additional variables as KEY=value pairs, separated by newlines. Highest priority, overrides all other sources.                    |
 | `monitor`          | `false`                               | Whether to [monitor the stack](#post-deployment-monitoring) after deployment.                                                     |
 | `monitor-timeout`  | `300`                                 | The maximum time in seconds to wait for the stack to stabilize.                                                                   |
-| `monitor-interval` | `10`                                  | The interval in seconds to check the stack status.                                                                                |
+| `monitor-interval` | `5`                                   | The interval in seconds to check the stack status.                                                                                |
+| `health-check-warnings` | `true`                           | Whether to emit [warnings for missing or suspect health checks](#health-check-validation).                                       |
 
 ### Outputs
 
@@ -578,7 +579,7 @@ notify you of the issue.
 
 The action will wait for a configurable maximum of `monitor-timeout` seconds for
 the services to stabilize, checking their status every `monitor-interval`
-seconds. The default values are 5 minutes and 10 seconds, respectively.
+seconds. The default values are 5 minutes and 5 seconds, respectively.
 
 You can adjust these values to suit your needs. For example, if you want to wait
 for 10 minutes and check every 30 seconds, you can set the following inputs:
@@ -595,6 +596,41 @@ jobs:
           monitor-timeout: 600 # 10 minutes
           monitor-interval: 30 # 30 seconds
 ```
+
+### Health Check Validation
+
+The action validates health check configurations in your compose spec before
+deploying, emitting warnings for common issues. This helps catch
+misconfigurations early rather than debugging failing containers
+post-deployment.
+
+**Missing health checks:** A warning is emitted for any service that has no
+`healthcheck` defined, or has it explicitly disabled (`test: ["NONE"]` or
+`disable: true`).
+
+**Suspect configurations:** The action warns about:
+
+- **interval < timeout** — the health check will overlap with itself
+- **retries: 1** — a single failure marks the container unhealthy
+- **No start_period with short interval (< 10s)** — the container may fail
+  checks before it is ready
+
+To suppress these warnings, set `health-check-warnings` to `false`:
+
+```yaml
+- name: Deploy to Docker Swarm
+  uses: matchory/deployment@v1
+  with:
+    health-check-warnings: false
+```
+
+#### Health Check Details in Failure Reports
+
+When monitoring is enabled and a service fails due to a health check issue,
+the failure report includes the health check configuration (test command,
+interval, timeout, retries, start period) alongside the task history and
+container logs. This appears in both the action log output and the GitHub
+Actions job summary.
 
 ## 🔨 Contributing
 

@@ -1,5 +1,5 @@
 import { debug } from "node:util";
-import { getBooleanInput, getInput } from "@actions/core";
+import { getBooleanInput, getInput, setSecret } from "@actions/core";
 
 /**
  * Deployment settings
@@ -7,6 +7,7 @@ import { getBooleanInput, getInput } from "@actions/core";
 export interface Settings {
   composeFiles?: string[];
   envVarPrefix: string;
+  healthCheckWarnings: boolean;
   keyInterpolation: boolean;
   manageVariables: boolean;
   monitor: boolean;
@@ -50,6 +51,8 @@ export function parseSettings(env: NodeJS.ProcessEnv) {
       /_$/,
       "",
     ),
+    healthCheckWarnings:
+      getBooleanInput("health-check-warnings", { required: false }) ?? true,
     keyInterpolation:
       getBooleanInput("key-interpolation", { required: false }) ?? false,
     manageVariables:
@@ -59,7 +62,7 @@ export function parseSettings(env: NodeJS.ProcessEnv) {
     monitorTimeout: parseInt(getInput("monitor-timeout") || "300", 10),
     stack,
     strictVariables:
-      getBooleanInput("strict-variables", { required: false }) ?? false,
+      getBooleanInput("strict-variables", { required: false }) ?? true,
     variables,
     version,
   });
@@ -130,6 +133,11 @@ function inferVariables(inputs: VariableInputs, env: NodeJS.ProcessEnv) {
   if (inputs.secrets) {
     const parsedSecrets = parseVariableInput(inputs.secrets);
     for (const [key, value] of parsedSecrets) {
+      // Ensure secrets are masked in output
+      if (value) {
+        setSecret(value);
+      }
+
       variables.set(key, value);
     }
   }

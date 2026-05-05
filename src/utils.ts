@@ -72,14 +72,59 @@ export async function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-export function mapToObject<T>(map: Map<string, T>): Record<string, T> {
-  const object: Record<string, T> = {};
+const VAR_REF_PATTERN =
+  /\$(?:([a-zA-Z_][a-zA-Z0-9_]*)|\{([a-zA-Z_][a-zA-Z0-9_]*)(?:(:?[-+?]|\?)[^{}]*)?})/gi;
 
-  for (const [key, value] of map) {
-    object[key] = value;
+/**
+ * Extract all variable names referenced in a string.
+ */
+function extractVariableRefs(str: string): string[] {
+  const refs: string[] = [];
+
+  for (const match of str.matchAll(VAR_REF_PATTERN)) {
+    refs.push(match[1] || match[2]);
   }
 
-  return object;
+  return refs;
+}
+
+/**
+ * Detect circular references in the variable dependency graph reachable from
+ * the given input string. Throws with the cycle path if one is found.
+ */
+function detectCycles(str: string, variables: Map<string, string>): void {
+  const visiting = new Set<string>();
+  const visited = new Set<string>();
+
+  function visit(key: string, path: string[]): void {
+    if (visited.has(key)) return;
+
+    if (visiting.has(key)) {
+      const cycleStart = path.indexOf(key);
+      const cycle = [...path.slice(cycleStart), key].join(" → ");
+
+      throw new Error(`Circular variable reference detected: ${cycle}`);
+    }
+
+    const value = variables.get(key);
+
+    if (value === undefined) return;
+
+    visiting.add(key);
+    path.push(key);
+
+    for (const ref of extractVariableRefs(value)) {
+      visit(ref, path);
+    }
+
+    path.pop();
+    visiting.delete(key);
+    visited.add(key);
+  }
+
+  for (const ref of extractVariableRefs(str)) {
+    visit(ref, []);
+  }
 }
 
 /**
@@ -114,6 +159,8 @@ export function interpolateString(
   // during variable interpolation
   const placeholder = "\u0000ESCAPED_DOLLAR\u0000";
   str = str.replace(/\$\$/g, placeholder);
+
+  detectCycles(str, variables);
 
   let match: RegExpMatchArray | null;
 

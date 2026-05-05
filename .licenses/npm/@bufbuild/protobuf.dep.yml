@@ -1,9 +1,8 @@
 ---
 name: "@bufbuild/protobuf"
-version: 2.10.0
+version: 2.11.0
 type: npm
-summary:
-  A complete implementation of Protocol Buffers in TypeScript, suitable for
+summary: A complete implementation of Protocol Buffers in TypeScript, suitable for
   web browsers and Node.js.
 homepage: https://github.com/bufbuild/protobuf-es
 license: apache-2.0

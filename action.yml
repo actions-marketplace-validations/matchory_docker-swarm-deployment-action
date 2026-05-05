@@ -18,16 +18,26 @@ inputs:
     description: |-
       Path to the Docker Compose file(s) to use for deployment relative to the repository root. Separate multiple files
       with colons (`:`). If omitted, the action will look for any of the following file variants, in order:
+       - `compose.production.yaml`
+       - `compose.production.yml`
+       - `compose.prod.yaml`
+       - `compose.prod.yml`
+       - `compose.yaml`
+       - `compose.yml`
        - `docker-compose.production.yaml`
-       - `docker-compose.production.yaml`
+       - `docker-compose.production.yml`
+       - `docker-compose.prod.yaml`
        - `docker-compose.prod.yml`
-       - `docker-compose.prod.yml`
-       - `.docker/docker-compose.yaml`
-       - `.docker/docker-compose.yml`
-       - `docker/docker-compose.yaml`
-       - `docker/docker-compose.yml`
        - `docker-compose.yaml`
        - `docker-compose.yml`
+       - `.docker/compose.yaml`
+       - `.docker/compose.yml`
+       - `.docker/docker-compose.yaml`
+       - `.docker/docker-compose.yml`
+       - `docker/compose.yaml`
+       - `docker/compose.yml`
+       - `docker/docker-compose.yaml`
+       - `docker/docker-compose.yml`
   variables:
     description: >-
       Variables to pass to the deployment as a list of key-value pairs in the
@@ -90,6 +100,11 @@ inputs:
     description: >-
       Interval for post-deployment monitoring checks in seconds.
     default: "5"
+  health-check-warnings:
+    description: >-
+      Whether to emit warnings for missing or suspect health check
+      configurations in compose services.
+    default: "true"
 
 outputs:
   status:
@@ -100,7 +115,9 @@ outputs:
     description: "Name of the stack deployed"
   version:
     description: "Version of the stack deployed"
+  service-logs:
+    description: "Logs of a failed service after deployment"
 
 runs:
-  using: node20
-  main: dist/index.cjs
+  using: node24
+  main: dist/index.js

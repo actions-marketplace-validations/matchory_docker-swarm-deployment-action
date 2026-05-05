@@ -1,5 +1,4 @@
-import * as crypto from "node:crypto";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { readFile, writeFile } from "node:fs/promises";
 import * as core from "@actions/core";
 import type { ComposeSpec } from "./compose.js";
@@ -14,6 +13,12 @@ export const versionLabel = "com.matchory.deployment.version";
 export const encodeLabel = "com.matchory.deployment.encode";
 export const decodeLabel = "com.matchory.deployment.decode";
 export const ignoreLabel = "com.matchory.deployment.ignore";
+
+/**
+ * Maximum length for Docker Swarm secret and config names.
+ * @see https://github.com/moby/swarmkit/issues/2918
+ */
+const MAX_NAME_LENGTH = 64;
 
 /**
  * Process a variable (secret or config)
@@ -98,9 +103,21 @@ export async function processVariable(
   const variableName =
     modifiedVariable?.name ?? variable.name ?? `${stack}-${name}`;
 
+  const finalName = `${variableName}-${hash.substring(0, 7)}`;
+
+  if (finalName.length > MAX_NAME_LENGTH) {
+    throw new Error(
+      `Variable "${name}" produces a Docker name that is ` +
+        `${finalName.length} characters long ("${finalName}"), which ` +
+        `exceeds Docker's ${MAX_NAME_LENGTH}-character limit. Use a ` +
+        `shorter stack name, variable name, or set an explicit "name" ` +
+        `property on the variable.`,
+    );
+  }
+
   return {
     ...(modifiedVariable ?? variable),
-    name: `${variableName}-${hash.substring(0, 7)}`,
+    name: finalName,
     labels: {
       ...(modifiedVariable?.labels ?? variable.labels),
       [nameLabel]: name,
@@ -236,11 +253,7 @@ const decoders = {
   url: (value) => decodeURIComponent(value),
 } satisfies Record<string, (value: string) => string>;
 
-async function encodeVariable(
-  content: string,
-  name: string,
-  variable: Variable,
-) {
+function encodeVariable(content: string, name: string, variable: Variable) {
   const format = variable.labels?.[
     encodeLabel
   ].toString() as keyof typeof encoders;
@@ -259,11 +272,7 @@ async function encodeVariable(
   return encoders[format](content);
 }
 
-async function decodeVariable(
-  content: string,
-  name: string,
-  variable: Variable,
-) {
+function decodeVariable(content: string, name: string, variable: Variable) {
   const format = variable.labels?.[
     decodeLabel
   ].toString() as keyof typeof decoders;
@@ -289,7 +298,7 @@ async function transformVariable(
 ): Promise<FileVariable> {
   // Generate a random file name for the secret, so it doesn't conflict with
   // existing files in the repository
-  const path = `./${name}.${crypto.randomUUID()}.generated.secret`;
+  const path = `./${name}.${randomUUID()}.generated.secret`;
 
   await writeFile(path, value, "utf8");
 
@@ -334,71 +343,14 @@ export async function pruneSecrets(
   { secrets }: ComposeSpec,
   { stack }: Settings,
 ) {
-  core.debug(`Pruning secrets for stack "${stack}"`);
-
-  const variableIdentifier = ({
+  await pruneStoredVariables({
+    kind: "secret",
+    specVariables: secrets,
     stack,
-    name,
-    hash,
-  }: {
-    stack: string;
-    name: string;
-    hash: string;
-  }) => stack + name + hash;
-  const specSecrets = secrets
-    ? Object.values(secrets)
-        .map(({ labels }) => marshalLabels(labels))
-        .filter((labels) => labels !== undefined)
-        .map((labels) => variableIdentifier(labels))
-    : [];
-
-  const items = await listSecrets({
-    labels: {
-      stackLabel: stack,
-    },
+    list: () => listSecrets({ labels: { [stackLabel]: stack } }),
+    remove: removeSecret,
+    checkRotation: true,
   });
-
-  if (items.length === 0) {
-    return;
-  }
-
-  core.info(
-    `Checking ${items.length} secret${items.length !== 1 ? "s" : ""} ` +
-      `for stack "${stack}"`,
-  );
-
-  for (let i = 0; i < items.length; i++) {
-    const { CreatedAt, ID, Name, Labels } = items[i];
-
-    const name = Name ?? ID;
-    const labels = marshalLabels(Labels);
-
-    core.debug(`Checking secret ${i + 1}/${items.length}: ${name}`);
-
-    if (!labels) {
-      core.notice(`Found invalid secret "${name}": Missing labels. Pruning.`);
-
-      await removeSecret(ID);
-      continue;
-    }
-
-    if (!specSecrets.includes(variableIdentifier(labels))) {
-      const hash = labels.hash.substring(0, 7);
-
-      core.notice(
-        `Pruning outdated version "${hash}" of secret "${labels.name}": ${name}`,
-      );
-
-      await removeSecret(ID);
-    }
-
-    // Check for old secrets
-    if (shouldRotate(new Date(CreatedAt ?? 0))) {
-      core.warning(
-        `Secret "${name}" has been in use for too long and should be rotated!`,
-      );
-    }
-  }
 }
 
 /**
@@ -408,64 +360,91 @@ export async function pruneConfigs(
   { configs }: ComposeSpec,
   { stack }: Settings,
 ) {
-  core.debug(`Pruning configs for stack "${stack}"`);
-
-  const variableIdentifier = ({
+  await pruneStoredVariables({
+    kind: "config",
+    specVariables: configs,
     stack,
-    name,
-    hash,
-  }: {
+    list: () => listConfigs({ labels: { [stackLabel]: stack } }),
+    remove: removeConfig,
+  });
+}
+
+async function pruneStoredVariables({
+  kind,
+  specVariables,
+  stack,
+  list,
+  remove,
+  checkRotation = false,
+}: {
+  kind: "secret" | "config";
+  specVariables: Record<string, Variable> | undefined;
+  stack: string;
+  list: () => Promise<
+    Array<{
+      ID: string;
+      Name: string;
+      Labels: Record<string, string>;
+      CreatedAt: string;
+    }>
+  >;
+  remove: (id: string) => Promise<void>;
+  checkRotation?: boolean;
+}) {
+  core.debug(`Pruning ${kind}s for stack "${stack}"`);
+
+  const variableIdentifier = (v: {
     stack: string;
     name: string;
     hash: string;
-  }) => stack + name + hash;
-  const specConfigs = configs
-    ? Object.values(configs)
+  }) => v.stack + v.name + v.hash;
+
+  const specIdentifiers = specVariables
+    ? Object.values(specVariables)
         .map(({ labels }) => marshalLabels(labels))
         .filter((labels) => labels !== undefined)
         .map((labels) => variableIdentifier(labels))
     : [];
 
-  const items = await listConfigs({
-    labels: {
-      stackLabel: stack,
-    },
-  });
+  const items = await list();
 
   if (items.length === 0) {
     return;
   }
 
   core.info(
-    `Checking ${items.length} config${items.length !== 1 ? "s" : ""} ` +
+    `Checking ${items.length} ${kind}${items.length !== 1 ? "s" : ""} ` +
       `for stack "${stack}"`,
   );
 
   for (let i = 0; i < items.length; i++) {
-    const { ID, Name, Labels } = items[i];
+    const { CreatedAt, ID, Name, Labels } = items[i];
 
     const name = Name ?? ID;
     const labels = marshalLabels(Labels);
 
-    core.debug(`Checking config ${i + 1}/${items.length}: ${name}`);
+    core.debug(`Checking ${kind} ${i + 1}/${items.length}: ${name}`);
 
     if (!labels) {
-      core.notice(
-        `Found invalid config "${name}": Missing variable labels. Pruning.}`,
-      );
-
-      await removeConfig(ID);
+      core.notice(`Found invalid ${kind} "${name}": Missing labels. Pruning.`);
+      await remove(ID);
       continue;
     }
 
-    if (!specConfigs.includes(variableIdentifier(labels))) {
+    if (!specIdentifiers.includes(variableIdentifier(labels))) {
       const hash = labels.hash.substring(0, 7);
 
       core.notice(
-        `Pruning outdated version "${hash}" of config "${labels.name}": ${name}`,
+        `Pruning outdated version "${hash}" of ${kind} "${labels.name}": ${name}`,
       );
 
-      await removeConfig(ID);
+      await remove(ID);
+    }
+
+    if (checkRotation && shouldRotate(new Date(CreatedAt ?? 0))) {
+      core.warning(
+        `Secret "${name}" has been in use for too long and should be rotated!`,
+      );
     }
   }
 }

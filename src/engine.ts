@@ -3,7 +3,6 @@ import { exec } from "@actions/exec";
 import { dump, load } from "js-yaml";
 import type { ComposeSpec } from "./compose.js";
 import type { Settings } from "./settings.js";
-import { mapToObject } from "./utils";
 
 /**
  * Deploy the stack
@@ -27,56 +26,11 @@ export async function deployStack(
     ],
     {
       stdin: dump(spec),
-      env: {
-        ...mapToObject(variables),
-      },
+      env: Object.fromEntries(variables),
     },
   );
 
   core.info(`Deployed stack ${stack}`);
-}
-
-export async function normalizeComposeSpecification(
-  composeFiles: string[],
-  { variables }: Pick<Readonly<Settings>, "variables">,
-  skipInterpolation = false,
-  pinImages = false,
-) {
-  const composeFileFlags = composeFiles.map((file) => `--compose-file=${file}`);
-  const content = await executeDockerCommand(
-    [
-      "compose",
-      "config",
-      ...composeFileFlags,
-      "--format=json",
-      skipInterpolation ? "--no-interpolate" : "",
-      pinImages ? "--resolve-image-digests" : "",
-    ],
-    {
-      env: {
-        ...mapToObject(variables),
-      },
-    },
-  );
-
-  if (!content) {
-    throw new Error(
-      "Failed to load compose file(s): No content produced. This is " +
-        "most likely a bug in the deployment action. Please report it to " +
-        "the action issues.",
-    );
-  }
-
-  try {
-    return JSON.parse(content) as ComposeSpec | undefined;
-  } catch (cause) {
-    throw new Error(
-      "Failed to load compose file(s): Failed to parse JSON output. " +
-        "This is most likely a bug in the deployment action. Please report " +
-        "it to the action issues.",
-      { cause },
-    );
-  }
 }
 
 export async function normalizeStackSpecification(
@@ -93,9 +47,7 @@ export async function normalizeStackSpecification(
       skipInterpolation ? "--skip-interpolation" : "",
     ],
     {
-      env: {
-        ...mapToObject(variables),
-      },
+      env: Object.fromEntries(variables),
       silent: true,
     },
   );
@@ -222,6 +174,36 @@ export async function inspectService(id: string) {
   }
 }
 
+export type TaskStatus = {
+  ID: string;
+  Name: string;
+  Image: string;
+  Node: string;
+  DesiredState: string;
+  CurrentState: string;
+  Error: string;
+  Ports: string;
+};
+
+export async function listServiceTasks(
+  serviceId: string,
+): Promise<TaskStatus[]> {
+  try {
+    const output = await executeDockerCommand(
+      ["service", "ps", "--format=json", "--no-trunc", serviceId],
+      { silent: true },
+    );
+
+    return parseLineDelimitedJson<TaskStatus>(output);
+  } catch (cause) {
+    const message = cause instanceof Error ? cause.message : String(cause);
+    throw new Error(
+      `Failed to list tasks for service "${serviceId}": ${message}`,
+      { cause },
+    );
+  }
+}
+
 export async function getServiceLogs(
   id: string,
   { tail, since }: { tail?: number; since?: Date },
@@ -233,7 +215,6 @@ export async function getServiceLogs(
         "logs",
         "--raw",
         "--no-trunc",
-        "--details",
         "--timestamps",
         tail ? `--tail=${tail}` : "",
         since ? `--since=${since.toISOString()}` : "",
@@ -247,7 +228,7 @@ export async function getServiceLogs(
       .split("\n")
       .filter((line) => !!line?.trim())
       .map((line) => {
-        const [rawTimestamp, metadata, ...rest] = line.split(" ");
+        const [rawTimestamp, ...rest] = line.split(" ");
         let timestamp: Date | null;
 
         try {
@@ -263,7 +244,6 @@ export async function getServiceLogs(
 
         return {
           timestamp,
-          metadata: parseLabels(metadata),
           message: rest.join(" "),
         };
       });
@@ -400,7 +380,13 @@ async function executeDockerCommand(
   let output = "";
   let errorOutput = "";
 
-  core.startGroup(`docker ${args.join(" ")}`);
+  // Only wrap with a group for non-silent commands (user-visible operations
+  // like `stack deploy`). Silent commands are internal data fetches whose
+  // raw output doesn't need a collapsible group, and skipping the group
+  // prevents interleaving when multiple silent commands run concurrently.
+  if (!silent) {
+    core.startGroup(`docker ${args.join(" ")}`);
+  }
 
   try {
     await exec(
@@ -421,7 +407,9 @@ async function executeDockerCommand(
       },
     );
 
-    core.info(output);
+    if (!silent) {
+      core.info(output);
+    }
   } catch (cause) {
     const message = cause instanceof Error ? cause.message : String(cause);
     core.error(`Command failed: ${message}`);
@@ -430,7 +418,9 @@ async function executeDockerCommand(
 
     throw new Error(`Failed to execute Docker Command: ${message}`, { cause });
   } finally {
-    core.endGroup();
+    if (!silent) {
+      core.endGroup();
+    }
   }
 
   return output;
@@ -495,21 +485,12 @@ function parseLineDelimitedJson<
 }
 
 function parseLabels(labels: string = "") {
-  return labels
-    .split(",")
-    .map((label) => {
+  return Object.fromEntries(
+    labels.split(",").map((label) => {
       const [key, ...values] = label.split("=");
-
       return [key, values.join("=")];
-    })
-    .reduce<Record<string, string>>(
-      (acc, [key, value]) => ({
-        // biome-ignore lint/performance/noAccumulatingSpread: Spreading is the best way to merge here
-        ...acc,
-        [key]: value,
-      }),
-      {},
-    );
+    }),
+  );
 }
 
 export type ServiceMetadata = {
