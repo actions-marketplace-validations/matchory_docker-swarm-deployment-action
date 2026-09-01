@@ -1,5 +1,5 @@
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   exists,
   findFirstExistingFile,
@@ -53,11 +53,30 @@ describe("Utilities", () => {
   });
 
   describe("sleep", () => {
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    // Fake timers, because comparing `Date.now()` either side of a real
+    // `setTimeout` is not reliable: the timer can fire a millisecond shy of the
+    // requested delay, and asserting `>= 100` then fails on a 99ms measurement.
+    // Driving the clock also lets us pin the actual contract -- that it does not
+    // resolve early -- rather than only that some time passed.
     it("should resolve after the specified time", async () => {
-      const start = Date.now();
-      await sleep(100);
-      const end = Date.now();
-      expect(end - start).toBeGreaterThanOrEqual(100);
+      vi.useFakeTimers();
+
+      let resolved = false;
+      const promise = sleep(100).then(() => {
+        resolved = true;
+      });
+
+      await vi.advanceTimersByTimeAsync(99);
+      expect(resolved).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(1);
+      await promise;
+
+      expect(resolved).toBe(true);
     });
 
     it("should resolve immediately if time is 0", async () => {
@@ -214,7 +233,7 @@ describe("Utilities", () => {
         expect(() =>
           interpolateString("${NAME?error message}", variables),
         ).toThrow(
-          "Failed to resolve variable NAME: Missing required value: error message",
+          "Failed to resolve variable NAME: it is required but has no value: error message",
         );
       });
 
@@ -223,7 +242,7 @@ describe("Utilities", () => {
         expect(() =>
           interpolateString("${NAME:?error message}", variables),
         ).toThrow(
-          "Failed to resolve variable NAME: Missing required value: error message",
+          "Failed to resolve variable NAME: it is required but has no value: error message",
         );
       });
 
@@ -232,7 +251,7 @@ describe("Utilities", () => {
         expect(() =>
           interpolateString("${NAME:?error message}", variables),
         ).toThrow(
-          "Failed to resolve variable NAME: Missing required value: error message",
+          "Failed to resolve variable NAME: it is required but has no value: error message",
         );
       });
 
@@ -258,7 +277,9 @@ describe("Utilities", () => {
       it("should handle empty error messages", () => {
         const variables = new Map<string, string>();
         expect(() => interpolateString("${NAME?}", variables)).toThrow(
-          "Failed to resolve variable NAME: Missing required value: ",
+          "Failed to resolve variable NAME: it is required but has no " +
+            'value. Set it via the "variables" or "secrets" input, or in ' +
+            "the workflow environment.",
         );
       });
     });
@@ -320,7 +341,7 @@ describe("Utilities", () => {
       it("should throw error in strict mode when variable is undefined", () => {
         const variables = new Map<string, string>();
         expect(() => interpolateString("Hello $NAME", variables, true)).toThrow(
-          "Variable NAME is required but not defined",
+          'Variable "NAME" is not defined.',
         );
       });
 
@@ -356,7 +377,7 @@ describe("Utilities", () => {
         const variables = new Map<string, string>();
         expect(() =>
           interpolateString("Hello $NAME $SURNAME", variables, true),
-        ).toThrow("Variable NAME is required but not defined");
+        ).toThrow('Variable "NAME" is not defined.');
       });
     });
 
@@ -546,20 +567,23 @@ describe("Utilities", () => {
         const variables = new Map<string, string>();
         expect(() =>
           interpolateString("${MISSING_VAR?Custom error}", variables),
-        ).toThrow("Missing required value: Custom error");
+        ).toThrow("it is required but has no value: Custom error");
       });
 
       it("should handle error propagation properly", () => {
         const variables = new Map<string, string>();
         expect(() => interpolateString("${VAR:?}", variables)).toThrow(
-          "Failed to resolve variable VAR: Missing required value: ",
+          "Failed to resolve variable VAR: it is required but has no value. " +
+            'Set it via the "variables" or "secrets" input',
         );
       });
 
       it("should handle strict mode errors with clear messages", () => {
         const variables = new Map<string, string>();
         expect(() => interpolateString("$UNDEFINED", variables, true)).toThrow(
-          "Variable UNDEFINED is required but not defined",
+          'Variable "UNDEFINED" is not defined. Set it via the "variables" ' +
+            'or "secrets" input, or in the workflow environment, or set ' +
+            '"strict-variables: false" to substitute an empty string instead.',
         );
       });
     });

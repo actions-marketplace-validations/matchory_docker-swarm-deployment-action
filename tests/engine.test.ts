@@ -143,9 +143,9 @@ services:
     });
 
     it("should throw error on invalid YAML", async () => {
-      // js-yaml load returns undefined for empty or invalid yaml like just ':'
+      // An unclosed flow mapping is invalid YAML and makes js-yaml throw
       mockedExec.mockImplementationOnce(async (_0, _1, options) => {
-        options?.listeners?.stdout?.(Buffer.from(":"));
+        options?.listeners?.stdout?.(Buffer.from("{ a: b"));
 
         return 0;
       });
@@ -274,7 +274,17 @@ services:
         return 0;
       });
       await expect(engine.inspectService("abc")).rejects.toThrowError(
-        /Failed to parse JSON output/,
+        /could not be parsed as JSON/,
+      );
+    });
+
+    it("should report a not-found error (not a parse bug) for an empty result", async () => {
+      mockedExec.mockImplementation(async (_0, _1, options) => {
+        options?.listeners?.stdout?.(Buffer.from("[]"));
+        return 0;
+      });
+      await expect(engine.inspectService("abc")).rejects.toThrowError(
+        /Service "abc" was not found on the Swarm/,
       );
     });
   });
@@ -570,6 +580,51 @@ services:
       mockedExec.mockRejectedValue(new Error("Docker error"));
       await expect(engine.removeConfig("cfg1")).rejects.toThrowError(
         /Failed to remove config/,
+      );
+    });
+  });
+
+  describe("isComposePluginAvailable", () => {
+    it("returns true when `docker compose version` succeeds", async () => {
+      mockedExec.mockResolvedValue(0);
+      await expect(engine.isComposePluginAvailable()).resolves.toBe(true);
+      expect(mockedExec).toHaveBeenCalledWith(
+        "docker",
+        ["compose", "version"],
+        expect.any(Object),
+      );
+    });
+
+    it("returns false when the command errors", async () => {
+      mockedExec.mockRejectedValue(new Error("unknown command"));
+      await expect(engine.isComposePluginAvailable()).resolves.toBe(false);
+    });
+  });
+
+  describe("mergeComposeFiles", () => {
+    it("runs `docker compose … config --no-interpolate` and returns stdout", async () => {
+      const merged = "services:\n  web:\n    image: nginx\n";
+      mockedExec.mockImplementation(async (_0, _1, options) => {
+        options?.listeners?.stdout?.(Buffer.from(merged));
+        return 0;
+      });
+
+      await expect(
+        engine.mergeComposeFiles(["base.yaml", "override.yaml"]),
+      ).resolves.toBe(merged);
+
+      expect(mockedExec).toHaveBeenCalledWith(
+        "docker",
+        [
+          "compose",
+          "--file",
+          "base.yaml",
+          "--file",
+          "override.yaml",
+          "config",
+          "--no-interpolate",
+        ],
+        expect.any(Object),
       );
     });
   });

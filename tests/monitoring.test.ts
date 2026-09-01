@@ -480,7 +480,7 @@ describe("Monitoring", () => {
     );
 
     const core = await import("@actions/core");
-    expect(core.error).toHaveBeenCalledWith(
+    expect(core.info).toHaveBeenCalledWith(
       expect.stringContaining("Error occurred during service update"),
     );
   });
@@ -507,7 +507,11 @@ describe("Monitoring", () => {
   });
 
   describe("edge cases and error handling", () => {
+    // Fake timers, because the monitor loop compares wall-clock elapsed time
+    // against the timeout: on real timers a `monitorTimeout` of 1s races the
+    // 1s poll interval, and the run loses that race under load.
     it("should handle non-Error thrown in monitorDeployment", async () => {
+      vi.useFakeTimers();
       vi.spyOn(engine, "listServices").mockResolvedValueOnce([
         {
           ID: "svc1",
@@ -530,9 +534,13 @@ describe("Monitoring", () => {
         variables: new Map(),
         version: "1.0.0",
       });
-      await expect(monitorDeployment(settings)).rejects.toThrow(
+
+      const promise = expect(monitorDeployment(settings)).rejects.toThrow(
         /Deployment timed out/,
       );
+
+      await vi.runAllTimersAsync();
+      await promise;
     });
 
     it("should throw error if service update fails", () => {
@@ -576,6 +584,28 @@ describe("Monitoring", () => {
           Replicas: "2/2",
         }),
       ).toBe(true);
+    });
+
+    it("should return true when converged with max_replicas_per_node suffix", () => {
+      // Docker appends "(max N per node)" when
+      // deploy.placement.max_replicas_per_node is set (issue #137).
+      expect(
+        isServiceRunning({
+          ID: "svc1",
+          Spec: { Name: "svc1", Labels: {}, TaskTemplate: {} },
+          Replicas: "1/1 (max 1 per node)",
+        }),
+      ).toBe(true);
+    });
+
+    it("should return false when partially running with max_replicas_per_node suffix", () => {
+      expect(
+        isServiceRunning({
+          ID: "svc1",
+          Spec: { Name: "svc1", Labels: {}, TaskTemplate: {} },
+          Replicas: "1/3 (max 1 per node)",
+        }),
+      ).toBe(false);
     });
 
     it("should treat missing UpdateStatus.State as 'updating'", () => {
@@ -685,10 +715,10 @@ describe("Monitoring", () => {
 
       await buildFailureReport("svc1", "api", new Date());
 
-      expect(core.error).toHaveBeenCalledWith(
+      expect(core.info).toHaveBeenCalledWith(
         expect.stringContaining("Task history"),
       );
-      expect(core.error).toHaveBeenCalledWith(
+      expect(core.info).toHaveBeenCalledWith(
         expect.stringContaining("worker-1"),
       );
     });
@@ -711,7 +741,7 @@ describe("Monitoring", () => {
 
       await buildFailureReport("svc1", "api", new Date());
 
-      expect(core.error).toHaveBeenCalledWith(
+      expect(core.info).toHaveBeenCalledWith(
         expect.stringContaining("No container logs available"),
       );
     });
@@ -743,8 +773,93 @@ describe("Monitoring", () => {
 
       await buildFailureReport("svc1", "api", new Date());
 
-      expect(core.error).toHaveBeenCalledWith(
+      expect(core.info).toHaveBeenCalledWith(
         expect.stringContaining("Cannot connect to database"),
+      );
+    });
+
+    // A failed service used to emit 3-4 annotations that duplicated the job
+    // summary. Annotations render only 10 per step and truncate near 4000
+    // characters, so a log dump could evict the headline naming the cause.
+    // The detail still reaches both the step log and the published summary.
+    it("should emit one error annotation and keep the detail in the log", async () => {
+      const core = await import("@actions/core");
+      vi.spyOn(engine, "listServiceTasks").mockResolvedValueOnce([
+        {
+          ID: "t1",
+          Name: "api.1",
+          Image: "img",
+          Node: "n1",
+          DesiredState: "Shutdown",
+          CurrentState: "Failed 1 minute ago",
+          Error: "task: non-zero exit (1)",
+          Ports: "",
+        },
+      ]);
+      vi.spyOn(engine, "getServiceLogs").mockResolvedValueOnce([
+        { timestamp: new Date("2026-03-28T12:00:01Z"), message: "boom" },
+      ]);
+
+      await buildFailureReport("svc1", "api", new Date());
+
+      expect(core.error).toHaveBeenCalledTimes(1);
+      expect(core.error).toHaveBeenCalledWith(
+        expect.stringContaining("Container exited with code 1"),
+      );
+      expect(core.info).toHaveBeenCalledWith(expect.stringContaining("boom"));
+    });
+
+    // The summary is buffered by @actions/core and only reaches the run page on
+    // write(), which was never called -- so every section built here was
+    // discarded. The runner masks registered secrets in summaries, so no
+    // redaction of our own is needed.
+    it("should publish the job summary it builds", async () => {
+      const core = await import("@actions/core");
+      vi.spyOn(engine, "listServiceTasks").mockResolvedValueOnce([
+        {
+          ID: "t1",
+          Name: "api.1",
+          Image: "img",
+          Node: "n1",
+          DesiredState: "Shutdown",
+          CurrentState: "Failed 1 minute ago",
+          Error: "task: non-zero exit (1)",
+          Ports: "",
+        },
+      ]);
+      vi.spyOn(engine, "getServiceLogs").mockResolvedValueOnce([]);
+
+      await buildFailureReport("svc1", "api", new Date());
+
+      expect(core.summary.write).toHaveBeenCalled();
+    });
+
+    // The caller throws the real deployment error immediately after this runs,
+    // so failing to publish the summary must not replace it.
+    it("should not throw when publishing the job summary fails", async () => {
+      const core = await import("@actions/core");
+      vi.spyOn(engine, "listServiceTasks").mockResolvedValueOnce([
+        {
+          ID: "t1",
+          Name: "api.1",
+          Image: "img",
+          Node: "n1",
+          DesiredState: "Shutdown",
+          CurrentState: "Failed 1 minute ago",
+          Error: "task: non-zero exit (1)",
+          Ports: "",
+        },
+      ]);
+      vi.spyOn(engine, "getServiceLogs").mockResolvedValueOnce([]);
+      vi.mocked(core.summary.write).mockRejectedValueOnce(
+        new Error("GITHUB_STEP_SUMMARY not set"),
+      );
+
+      await expect(
+        buildFailureReport("svc1", "api", new Date()),
+      ).resolves.not.toThrow();
+      expect(core.warning).toHaveBeenCalledWith(
+        expect.stringContaining("job summary"),
       );
     });
 
@@ -1205,7 +1320,7 @@ describe("Monitoring", () => {
       expect(core.info).toHaveBeenCalledWith(
         expect.stringContaining("Services converged: web"),
       );
-      expect(core.error).toHaveBeenCalledWith(
+      expect(core.info).toHaveBeenCalledWith(
         expect.stringContaining("Services not converged: api"),
       );
     });

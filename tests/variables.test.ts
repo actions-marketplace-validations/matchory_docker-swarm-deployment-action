@@ -1,7 +1,7 @@
 import * as crypto from "node:crypto";
 import * as core from "@actions/core";
-import { beforeEach, describe, expect, it, vi } from "vitest";
-import { defineComposeSpec } from "../src/compose.js";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { type ComposeSpec, defineComposeSpec } from "../src/compose.js";
 import * as engine from "../src/engine.js";
 import { defineSettings } from "../src/settings.js";
 import * as utils from "../src/utils.js";
@@ -17,15 +17,19 @@ import {
   pruneConfigs,
   pruneSecrets,
   pruneVariables,
+  redactSecretValues,
+  removeGeneratedVariableFiles,
   stackLabel,
   versionLabel,
 } from "../src/variables.js";
 
 const readFile = vi.hoisted(() => vi.fn());
 const writeFile = vi.hoisted(() => vi.fn());
+const unlink = vi.hoisted(() => vi.fn());
 vi.mock("node:fs/promises", () => ({
   readFile,
   writeFile,
+  unlink,
 }));
 vi.mock("node:crypto", {
   spy: true,
@@ -59,6 +63,8 @@ describe("Variables", () => {
     vi.unstubAllEnvs();
     settings.variables = new Map();
   });
+
+  afterEach(removeGeneratedVariableFiles);
 
   describe("Processing", () => {
     it("should process variables with default values", async () => {
@@ -252,6 +258,11 @@ describe("Variables", () => {
             [versionLabel]: "1.0.0",
           },
         });
+
+        await removeGeneratedVariableFiles();
+        expect(unlink).toHaveBeenCalledExactlyOnceWith(
+          "./foo.36934723-0a0b-4eb6-ab9d-d3a4e5e3cb34.generated.secret",
+        );
       });
 
       it("should not interpolate variables within environment variable content", async () => {
@@ -326,6 +337,9 @@ describe("Variables", () => {
             [versionLabel]: "1.0.0",
           },
         });
+
+        await removeGeneratedVariableFiles();
+        expect(unlink).not.toHaveBeenCalled();
       });
 
       it("should bail on missing files", async () => {
@@ -1018,6 +1032,47 @@ describe("Variables", () => {
     });
   });
 
+  describe("Cleanup", () => {
+    it("should remove files when writing their content fails", async () => {
+      const variable = defineVariable({ environment: "FOO_BAR" });
+      settings.variables.set("FOO_BAR", "secret");
+
+      vi.spyOn(crypto, "randomUUID").mockImplementation(
+        () => "36934723-0a0b-4eb6-ab9d-d3a4e5e3cb34",
+      );
+      writeFile.mockRejectedValue(new Error("Write failed"));
+      unlink.mockRejectedValue(
+        Object.assign(new Error("File not found"), { code: "ENOENT" }),
+      );
+
+      await expect(
+        processVariable("foo", variable, settings),
+      ).rejects.toThrowError("Write failed");
+      await removeGeneratedVariableFiles();
+
+      expect(unlink).toHaveBeenCalledWith(
+        "./foo.36934723-0a0b-4eb6-ab9d-d3a4e5e3cb34.generated.secret",
+      );
+    });
+
+    it("should warn but not throw when a file cannot be removed", async () => {
+      const variable = defineVariable({ environment: "FOO_BAR" });
+      settings.variables.set("FOO_BAR", "secret");
+
+      vi.spyOn(crypto, "randomUUID").mockImplementation(
+        () => "36934723-0a0b-4eb6-ab9d-d3a4e5e3cb34",
+      );
+      unlink.mockRejectedValueOnce(new Error("Permission denied"));
+
+      await processVariable("foo", variable, settings);
+
+      await expect(removeGeneratedVariableFiles()).resolves.not.toThrow();
+      expect(core.warning).toHaveBeenCalledWith(
+        expect.stringContaining("Permission denied"),
+      );
+    });
+  });
+
   describe("Pruning", () => {
     it("should prune configs", async () => {
       const spec = defineComposeSpec({
@@ -1533,6 +1588,97 @@ describe("Variables", () => {
       expect(engine.removeSecret).toHaveBeenCalledWith("2");
       expect(engine.removeConfig).toHaveBeenCalledWith("1");
       expect(engine.removeConfig).toHaveBeenCalledWith("2");
+    });
+  });
+
+  describe("redactSecretValues", () => {
+    const spec = (services: ComposeSpec["services"]) =>
+      defineComposeSpec({ version: "3.8", services });
+
+    it("should replace a whole-string secret value with its variable name", () => {
+      const result = redactSecretValues(
+        spec({ app: { environment: { TOKEN: "s3cr3t-value-here" } } }),
+        new Map([["TOKEN", "s3cr3t-value-here"]]),
+      );
+
+      expect(result.services).toEqual({
+        app: { environment: { TOKEN: "${TOKEN}" } },
+      });
+    });
+
+    it("should replace a secret embedded in a longer string", () => {
+      const result = redactSecretValues(
+        spec({
+          app: {
+            environment: {
+              DATABASE_URL: "postgres://user:sup3rs3cr3tpw@host/db",
+            },
+          },
+        }),
+        new Map([["PASSWORD", "sup3rs3cr3tpw"]]),
+      );
+
+      expect(result.services).toEqual({
+        app: {
+          environment: {
+            DATABASE_URL: "postgres://user:${PASSWORD}@host/db",
+          },
+        },
+      });
+    });
+
+    // Substring-redacting a short value would corrupt unrelated strings: a
+    // secret of "1" would rewrite every "1" in the spec, image tags included.
+    it("should not substring-redact a short secret value", () => {
+      const result = redactSecretValues(
+        spec({ app: { image: "nginx:1.27" } }),
+        new Map([["REPLICAS", "1"]]),
+      );
+
+      expect(result.services).toEqual({ app: { image: "nginx:1.27" } });
+    });
+
+    it("should still redact a short secret that is an entire value", () => {
+      const result = redactSecretValues(
+        spec({ app: { environment: { PIN: "1234" } } }),
+        new Map([["PIN", "1234"]]),
+      );
+
+      expect(result.services).toEqual({
+        app: { environment: { PIN: "${PIN}" } },
+      });
+    });
+
+    it("should leave values that did not come from the secrets input alone", () => {
+      const result = redactSecretValues(
+        spec({ app: { environment: { REGION: "eu-central-1" } } }),
+        new Map([["TOKEN", "unrelated-secret-value"]]),
+      );
+
+      expect(result.services).toEqual({
+        app: { environment: { REGION: "eu-central-1" } },
+      });
+    });
+
+    it("should not mutate the spec it was given", () => {
+      const original = spec({
+        app: { environment: { TOKEN: "s3cr3t-value-here" } },
+      });
+
+      redactSecretValues(original, new Map([["TOKEN", "s3cr3t-value-here"]]));
+
+      expect(original.services).toEqual({
+        app: { environment: { TOKEN: "s3cr3t-value-here" } },
+      });
+    });
+
+    it("should ignore empty secret values", () => {
+      const result = redactSecretValues(
+        spec({ app: { image: "nginx:latest" } }),
+        new Map([["EMPTY", ""]]),
+      );
+
+      expect(result.services).toEqual({ app: { image: "nginx:latest" } });
     });
   });
 });

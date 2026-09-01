@@ -21,14 +21,14 @@ jobs:
     steps:
       - name: Checkout
         id: checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: "false"
           fetch-depth: 0
 
       - name: Setup Node.js
         id: setup-node
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .node-version
           cache: npm
@@ -39,12 +39,19 @@ jobs:
 
       - name: Lint Codebase
         id: super-linter
-        uses: super-linter/super-linter/slim@v8
+        uses: super-linter/super-linter/slim@4ce20838b8ab83717e78138c5b3a1407148e0918 # v8.7.0
         env:
           DEFAULT_BRANCH: main
           FILTER_REGEX_EXCLUDE: (dist|docs/superpowers|\.licenses)/.*
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VALIDATE_ALL_CODEBASE: true
+          # Biome is checked in ci.yml instead, using the version pinned in
+          # package.json. Super-linter bundles its own Biome, which drifts from
+          # that pin: 8.7.0 ships 2.5.0 against our 2.5.5, and the two format
+          # some constructs differently with no output that satisfies both. A
+          # green `npm run all` would then fail CI for no discoverable reason.
+          VALIDATE_BIOME_FORMAT: false
+          VALIDATE_BIOME_LINT: false
           VALIDATE_CHECKOV: false
           VALIDATE_JAVASCRIPT_ES: false
           VALIDATE_GITHUB_ACTIONS_ZIZMOR: false

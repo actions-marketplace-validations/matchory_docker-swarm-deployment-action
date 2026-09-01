@@ -61,6 +61,9 @@ describe("main", () => {
     vi.stubEnv("GITHUB_REPOSITORY", "my-org/my-app");
     vi.stubEnv("GITHUB_SHA", "4fadb584c2bad24be4467665cc6874dc57c2034e");
     vi.spyOn(core, "getInput").mockReturnValue("");
+    vi.spyOn(core, "getBooleanInput").mockImplementation(
+      (name) => ({ "upload-compose-spec": false })[name] as boolean,
+    );
     vi.mocked(exec).mockResolvedValue(0);
     vi.mocked(exec)
       // docker stack config
@@ -92,10 +95,7 @@ describe("main", () => {
       });
     readFile.mockResolvedValueOnce(dump(composeSpec));
     writeFile.mockResolvedValue(undefined);
-    mockRandomUUID
-      .mockReturnValueOnce("compose-temp-uuid") // For compose processing
-      .mockReturnValueOnce("artifact-uuid-123"); // For artifact storage
-    mockUploadArtifact.mockResolvedValueOnce({ id: "artifact-123" });
+    mockRandomUUID.mockReturnValueOnce("compose-temp-uuid");
 
     await expect(run()).resolves.not.toThrow();
     expect(core.setFailed).not.toHaveBeenCalled();
@@ -103,6 +103,10 @@ describe("main", () => {
     expect(core.setOutput).toHaveBeenCalledWith("stack-name", "my-app");
     expect(core.setOutput).toHaveBeenCalledWith("version", "4fadb58");
     expect(core.setOutput).toHaveBeenCalledWith("status", "success");
+    expect(mockUploadArtifact).not.toHaveBeenCalled();
+    expect(core.info).toHaveBeenCalledWith(
+      "Compose spec artifact upload is disabled",
+    );
   });
 
   it("should report a deployment failure", async () => {
@@ -133,7 +137,7 @@ describe("main", () => {
     expect(core.setOutput).toHaveBeenCalledExactlyOnceWith("status", "failure");
   });
 
-  it("should store compose spec artifact successfully", async () => {
+  it("should store the artifact and report cleanup failures", async () => {
     const composeSpec = defineComposeSpec({
       services: {
         app: {
@@ -177,6 +181,9 @@ describe("main", () => {
       .mockReturnValueOnce("artifact-uuid-123") // For artifact storage
       .mockReturnValue("fallback-uuid"); // For any additional calls
     mockUploadArtifact.mockResolvedValueOnce({ id: "artifact-123" });
+    unlink
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error("Permission denied"));
 
     await expect(run()).resolves.not.toThrow();
 
@@ -193,10 +200,73 @@ describe("main", () => {
       ".",
       { retentionDays: 30 },
     );
-    // Only health check warnings (no artifact warnings)
-    for (const call of vi.mocked(core.warning).mock.calls) {
-      expect(call[0]).toMatch(/health check/i);
-    }
+    expect(unlink).toHaveBeenCalledWith(
+      expect.stringMatching(/^\.\/compose-spec\.generated\..*\.json$/),
+    );
+    expect(core.warning).toHaveBeenCalledWith(
+      expect.stringContaining("Permission denied"),
+    );
+    expect(core.setFailed).not.toHaveBeenCalled();
+  });
+
+  it("should redact secrets from the artifact but not from the output", async () => {
+    const composeSpec = defineComposeSpec({
+      services: {
+        app: {
+          image: "my-app:latest",
+          environment: { TOKEN: "${TOKEN}" },
+        },
+      },
+    });
+
+    vi.stubEnv("DOCKER_HOST", "tcp://localhost:2375");
+    vi.stubEnv("GITHUB_REPOSITORY", "my-org/my-app");
+    vi.stubEnv("GITHUB_SHA", "4fadb584c2bad24be4467665cc6874dc57c2034e");
+    vi.spyOn(core, "getInput").mockImplementation((name) =>
+      name === "secrets" ? "TOKEN=sup3rs3cr3tvalue" : "",
+    );
+    vi.mocked(exec).mockResolvedValue(0);
+    vi.mocked(exec)
+      .mockImplementationOnce(async (_0, _1, options) => {
+        options?.listeners?.stdout?.(Buffer.from(dump(composeSpec)));
+        return 0;
+      })
+      .mockImplementationOnce(async (_0, _1, options) => {
+        options?.listeners?.stdout?.(Buffer.from("Deploying stack my-app"));
+        return 0;
+      })
+      .mockImplementation(async (_0, _1, options) => {
+        options?.listeners?.stdout?.(Buffer.from("[]"));
+        return 0;
+      });
+
+    readFile.mockResolvedValueOnce(dump(composeSpec));
+    writeFile.mockResolvedValue(undefined);
+    mockRandomUUID.mockReturnValue("uuid");
+    mockUploadArtifact.mockResolvedValueOnce({ id: "artifact-123" });
+    unlink.mockResolvedValue(undefined);
+
+    await expect(run()).resolves.not.toThrow();
+    expect(core.setFailed).not.toHaveBeenCalled();
+
+    // Select the artifact write specifically: `writeSpecFile` also writes the
+    // pre-interpolation spec, which contains "${TOKEN}" for unrelated reasons.
+    const artifactWrite = writeFile.mock.calls.find(([path]) =>
+      String(path).includes("compose-spec.generated."),
+    );
+    expect(artifactWrite).toBeDefined();
+
+    // The artifact leaves the job and is readable repository-wide, so the
+    // secret must not appear in it.
+    const written = artifactWrite?.[1] as string;
+    expect(written).not.toContain("sup3rs3cr3tvalue");
+    expect(written).toContain("${TOKEN}");
+
+    // The output stays inside the job and is deliberately left intact.
+    const output = vi
+      .mocked(core.setOutput)
+      .mock.calls.find(([name]) => name === "compose-spec");
+    expect(JSON.stringify(output?.[1])).toContain("sup3rs3cr3tvalue");
   });
 
   it("should warn when file writing fails but continue execution", async () => {
@@ -239,9 +309,17 @@ describe("main", () => {
     mockRandomUUID
       .mockReturnValueOnce("compose-temp-uuid") // For compose processing
       .mockReturnValueOnce("artifact-uuid-123"); // For artifact storage
+    unlink
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(
+        Object.assign(new Error("File not found"), { code: "ENOENT" }),
+      );
 
     await expect(run()).resolves.not.toThrow();
 
+    expect(unlink).toHaveBeenCalledWith(
+      expect.stringMatching(/^\.\/compose-spec\.generated\..*\.json$/),
+    );
     expect(core.warning).toHaveBeenCalledWith(
       expect.objectContaining({
         message:
@@ -296,6 +374,9 @@ describe("main", () => {
 
     expect(writeFile).toHaveBeenCalled();
     expect(mockUploadArtifact).toHaveBeenCalled();
+    expect(unlink).toHaveBeenCalledWith(
+      expect.stringMatching(/^\.\/compose-spec\.generated\..*\.json$/),
+    );
     expect(core.warning).toHaveBeenCalledWith(
       expect.objectContaining({
         message:

@@ -4,7 +4,12 @@ import * as core from "@actions/core";
 import type { ComposeSpec } from "./compose.js";
 import { listConfigs, listSecrets, removeConfig, removeSecret } from "./engine";
 import type { Settings } from "./settings.js";
-import { exists, interpolateString } from "./utils.js";
+import {
+  exists,
+  interpolateString,
+  mapStrings,
+  removeFileQuietly,
+} from "./utils.js";
 
 export const nameLabel = "com.matchory.deployment.name";
 export const hashLabel = "com.matchory.deployment.hash";
@@ -79,8 +84,10 @@ export async function processVariable(
 
   if (!content) {
     core.warning(
-      `Variable "${name}" is defined with an empty value. This is ` +
-        `not recommended, as it may lead to unexpected behavior.`,
+      `Variable "${name}" resolved to an empty value; the secret or config ` +
+        `will be created empty. If that is not intended, check the source ` +
+        `it is read from (its "file"/"environment"/"content" property, a ` +
+        `"${name}.secret" file, or a matching environment variable).`,
     );
   }
 
@@ -291,6 +298,62 @@ function decodeVariable(content: string, name: string, variable: Variable) {
   return decoders[format](content);
 }
 
+const generatedFiles = new Set<string>();
+
+/**
+ * Remove generated variable files so secrets do not persist on reused runners
+ */
+export async function removeGeneratedVariableFiles() {
+  for (const path of generatedFiles) {
+    await removeFileQuietly(path, "temporary variable file");
+  }
+
+  generatedFiles.clear();
+}
+
+// Below this length, a secret is only redacted when it makes up an entire
+// value. Substring-redacting a short one would rewrite unrelated strings: a
+// secret of "1" would turn the image "nginx:1.27" into "nginx:${NAME}.27".
+const minSubstringRedactionLength = 8;
+
+/**
+ * Redact values sourced from the `secrets` input out of a Compose specification
+ *
+ * Interpolation inlines every variable value into the spec, so any copy of it
+ * that leaves the job carries those values in plaintext. Each occurrence is
+ * replaced with `${NAME}`, which both hides the value and keeps the result
+ * readable as a template, showing which variable supplied it.
+ *
+ * Only the `secrets` input is redacted; plain `variables` stay visible, which
+ * is what keeps the artifact useful for debugging a deployment.
+ *
+ * @param spec The interpolated Compose specification
+ * @param secretValues Variable names mapped to the values they resolved to
+ * @returns A copy of the spec with secret values replaced
+ */
+export function redactSecretValues(
+  spec: ComposeSpec,
+  secretValues: ReadonlyMap<string, string>,
+): ComposeSpec {
+  // Longest first, so a secret that contains another is replaced as a whole
+  // rather than being left half-rewritten by the shorter one. Empty values are
+  // dropped: replacing "" would splice the placeholder between every character.
+  const redactable = [...secretValues]
+    .filter(([, value]) => value)
+    .sort(([, a], [, b]) => b.length - a.length);
+
+  return mapStrings(spec, (value) => {
+    for (const [name, secret] of redactable) {
+      // Short secrets are replaced only where they make up the entire value.
+      if (secret.length >= minSubstringRedactionLength || value === secret) {
+        value = value.replaceAll(secret, `\${${name}}`);
+      }
+    }
+
+    return value;
+  });
+}
+
 async function transformVariable(
   value: string,
   name: string,
@@ -300,6 +363,7 @@ async function transformVariable(
   // existing files in the repository
   const path = `./${name}.${randomUUID()}.generated.secret`;
 
+  generatedFiles.add(path);
   await writeFile(path, value, "utf8");
 
   // Remove the existing value pointer from the variable to avoid multiple
@@ -443,7 +507,9 @@ async function pruneStoredVariables({
 
     if (checkRotation && shouldRotate(new Date(CreatedAt ?? 0))) {
       core.warning(
-        `Secret "${name}" has been in use for too long and should be rotated!`,
+        `Secret "${name}" is over a year old and should be rotated. Update ` +
+          `its value at the source it is read from and redeploy to roll it ` +
+          `over to a fresh secret.`,
       );
     }
   }

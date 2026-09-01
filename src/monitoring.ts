@@ -92,16 +92,25 @@ export async function monitorDeployment(
         ...pendingNames.map((n) => [{ data: n }, { data: "Pending" }]),
       ]);
 
+      await publishSummary();
+
       if (convergedNames.length > 0) {
         core.info(`Services converged: ${convergedNames.join(", ")}`);
       }
 
       if (pendingNames.length > 0) {
-        core.error(`Services not converged: ${pendingNames.join(", ")}`);
+        // Not an annotation: each pending service already emitted one via
+        // `buildFailureReport`, and the thrown message below reports the
+        // counts and is annotated by `setFailed`.
+        core.info(`Services not converged: ${pendingNames.join(", ")}`);
       }
 
       throw new Error(
-        `Deployment timed out: ${completedServices.size}/${services.length} services converged`,
+        `Deployment timed out after ${settings.monitorTimeout}s: ` +
+          `${completedServices.size}/${services.length} services converged. ` +
+          `See the per-service failure reports above for why the remaining ` +
+          `services did not become healthy, or raise the "monitor-timeout" ` +
+          `input if they simply need more time.`,
       );
     }
 
@@ -199,7 +208,12 @@ export async function monitorDeployment(
             undefined,
             healthcheck,
           );
-          core.error(`Service Details:\n${JSON.stringify(service, null, 2)}`);
+          // A full service inspect dump is a debug aid, not a headline, and it
+          // is long enough to crowd out the annotation that names the cause.
+          // Guarded so the payload is not serialized when it will be dropped.
+          if (core.isDebug()) {
+            core.debug(`Service Details:\n${JSON.stringify(service, null, 2)}`);
+          }
         }
       }
 
@@ -304,9 +318,19 @@ export function isServiceRunning(
   core.debug(`Checking if service "${name}" is currently running`);
 
   if (service.Replicas) {
-    const [running = 0, desired = 0] = service.Replicas.split("/", 2);
+    // The Replicas field is formatted as "running/desired", but Docker appends
+    // a human-readable suffix such as "1/1 (max 1 per node)" when
+    // deploy.placement.max_replicas_per_node is set. Parse the leading integer
+    // from each side so the suffix doesn't break the comparison (see #137).
+    const [runningStr, desiredStr] = service.Replicas.split("/", 2);
+    const running = Number.parseInt(runningStr ?? "", 10);
+    const desired = Number.parseInt(desiredStr ?? "", 10);
 
-    if (running === desired) {
+    if (
+      !Number.isNaN(running) &&
+      !Number.isNaN(desired) &&
+      running === desired
+    ) {
       core.debug(
         `Service "${name}" is running (${running}/${desired} replicas)`,
       );
@@ -395,6 +419,28 @@ function resolveFailureReason(
 /**
  * Build a structured diagnostic report for a failed service update.
  */
+/**
+ * Publish the buffered job summary to the run page
+ *
+ * `@actions/core` buffers summary content and only writes it to
+ * `$GITHUB_STEP_SUMMARY` when this is called, so anything added without it is
+ * silently discarded. The runner masks registered secrets in summaries, the
+ * same as it does in the log, so no redaction of our own is required here.
+ *
+ * Failures are reported rather than thrown: callers raise the actual
+ * deployment error immediately after building a report, and that error is far
+ * more useful than one about writing a summary.
+ */
+async function publishSummary() {
+  try {
+    await core.summary.write();
+  } catch (cause) {
+    const message = cause instanceof Error ? cause.message : String(cause);
+
+    core.warning(`Failed to publish the job summary: ${message}`);
+  }
+}
+
 export async function buildFailureReport(
   serviceId: string,
   serviceName: string,
@@ -432,7 +478,7 @@ export async function buildFailureReport(
   }
 
   if (errorResult?.category === "health_check" && healthcheck) {
-    core.error(
+    core.info(
       `Health check configuration for service "${serviceName}":\n` +
         formatHealthCheck(healthcheck),
     );
@@ -445,7 +491,7 @@ export async function buildFailureReport(
     })
     .join("\n");
 
-  core.error(`Task history for service "${serviceName}":\n${history}`);
+  core.info(`Task history for service "${serviceName}":\n${history}`);
 
   let logs: Awaited<ReturnType<typeof getServiceLogs>>;
 
@@ -462,13 +508,13 @@ export async function buildFailureReport(
   });
 
   if (formattedLogs.length === 0) {
-    core.error(
+    core.info(
       `No container logs available for service "${serviceName}" (container may not have started)`,
     );
   } else {
     const logOutput = formattedLogs.map((l) => `  ${l}`).join("\n");
     core.setOutput("service-logs", logOutput);
-    core.error(`Container logs for service "${serviceName}":\n${logOutput}`);
+    core.info(`Container logs for service "${serviceName}":\n${logOutput}`);
   }
 
   // Job summary
@@ -510,6 +556,8 @@ export async function buildFailureReport(
       true,
     );
   }
+
+  await publishSummary();
 }
 
 export type ErrorCategory =

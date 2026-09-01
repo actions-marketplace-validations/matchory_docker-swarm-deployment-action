@@ -17,25 +17,57 @@
 
 ![Docker Swarm Deployments](./.github/assets/deployment-action-overview.png)
 
+## 📑 Contents
+
+- [✨ Features](#-features)
+- [🚀 Getting Started](#-getting-started)
+  - [Prerequisites](#prerequisites)
+  - [Simple Usage](#simple-usage)
+- [⚙ Configuration](#-configuration)
+  - [Inputs](#inputs)
+  - [Outputs](#outputs)
+- [📖 Reference](#-reference)
+  - [How Compose File Detection Works](#how-compose-file-detection-works)
+    - [Using environment variables](#using-environment-variables)
+    - [Specifying a Custom Compose File, or Multiple Files](#specifying-a-custom-compose-file-or-multiple-files)
+  - [How Compose Files Are Processed](#how-compose-files-are-processed)
+    - [Compose-Spec to Swarm Reconciliation](#compose-spec-to-swarm-reconciliation)
+    - [Variable interpolation](#variable-interpolation)
+  - [Configuring Secrets and Configs](#configuring-secrets-and-configs)
+    - [Loading Environment Variables or inline Content](#loading-environment-variables-or-inline-content)
+    - [Smart Variable Resolution](#smart-variable-resolution)
+    - [Providing GitHub Secrets and Variables](#providing-github-secrets-and-variables)
+    - [Automatic Rotation](#automatic-rotation)
+    - [Configuring the Variable Name](#configuring-the-variable-name)
+    - [Disabling Automatic Variable Management](#disabling-automatic-variable-management)
+    - [Data Transformation](#data-transformation)
+  - [How the stack is deployed](#how-the-stack-is-deployed)
+  - [Post-Deployment Monitoring](#post-deployment-monitoring)
+    - [Monitoring Timeout & Interval](#monitoring-timeout--interval)
+  - [Health Check Validation](#health-check-validation)
+    - [Health Check Details in Failure Reports](#health-check-details-in-failure-reports)
+- [🔨 Contributing](#-contributing)
+  - [Development Setup](#development-setup)
+  - [Before Opening a Pull Request](#before-opening-a-pull-request)
+- [📄 License](#-license)
+
 ## ✨ Features
 
 - **Easy Setup:** The action uses
   [the same environment variables](https://docs.docker.com/reference/cli/docker/#environment-variables)
-  as the Docker CLI, so you can connect to your Docker Swarm cluster using a
-  context, and via all transports supported by Docker (e.g., HTTP, TCP, SSH,
-  etc.).
-- **Smart Compose Handling:** It automatically discovers your Compose file and
-  supports both the Compose Specification and Compose File v3, so you don't have
-  to worry about incompatibilities.
-- **Automatic Config & Secret Management:** It rotates secrets and configs
-  automatically and can even transform their data on-the-fly (e.g., base64
-  encode/decode).
+  as the Docker CLI, so you can connect to your Docker Swarm cluster using a context, and via all transports supported
+  by Docker (e.g., HTTP, TCP, SSH, etc.).
+- **Smart Compose Handling:** It automatically discovers your Compose file and supports both the Compose Specification
+  and Compose File v3, so you don't have to worry about incompatibilities.
+- **Automatic Config & Secret Management:** It rotates secrets and configs automatically and can even transform their
+  data on-the-fly (e.g., base64 encode/decode).
 - **Reliable Deployments:** Validates your configuration before deploying using
   `docker stack config`.
-- **Optional Post-Deployment Monitoring:** Ensures your services are stable
-  after deployment.
-- **Fully Tested:** An extensive test suite ensures the action works as
-  expected.
+- **Optional Post-Deployment Monitoring:** Ensures your services are stable after deployment.
+- **Actionable Failure Diagnostics:** When a service fails, the action reports a categorized cause (image pull failure,
+  crash, OOM kill, failing health check, scheduling problem, and more) along with the task attempt history and container
+  logs — in the log output and the job summary alike, so you don't have to SSH into the cluster to find out what broke.
+- **Fully Tested:** An extensive test suite ensures the action works as expected.
 
 ## 🚀 Getting Started
 
@@ -46,10 +78,10 @@
 
 ### Simple Usage
 
-In most cases, you don't need to explicitly tell the action where your Compose
-file is. If your file is named commonly (like `compose.yaml`, `compose.yml`,
-`docker-compose.yaml`, or `docker-compose.production.yml`) and is in your
-repository's root or a standard location, the action will find it automatically.
+In most cases, you don't need to explicitly tell the action where your Compose file is. If your file is named commonly
+(like `compose.yaml`, `compose.yml`,
+`docker-compose.yaml`, or `docker-compose.production.yml`) and is in your repository's root or a standard location, the
+action will find it automatically.
 
 Here's a basic workflow example:
 
@@ -62,19 +94,19 @@ on:
 
 jobs:
   deploy:
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-          uses: actions/checkout@v4
+        uses: actions/checkout@v4
 
       - name: Deploy to Docker Swarm
-          uses: matchory/deployment@v1
-          environment:
-            DOCKER_HOST: tcp://my-swarm-host:2375
+        uses: matchory/docker-swarm-deployment-action@v1
+        env:
+          DOCKER_HOST: tcp://my-swarm-host:2375
 ```
 
-You could also leverage a Docker context to connect to your Swarm cluster. This
-is the recommended way to connect to a remote Docker host, as it allows you to
-use SSH or TLS for secure connections:
+You could also leverage a Docker context to connect to your Swarm cluster. This is the recommended way to connect to a
+remote Docker host, as it allows you to use SSH or TLS for secure connections:
 
 ```yaml
 name: Deploy to Docker Swarm
@@ -85,6 +117,7 @@ on:
 
 jobs:
   deploy:
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -97,51 +130,60 @@ jobs:
           ssh_key: ${{ secrets.SSH_KEY }}
 
       - name: Deploy to Docker Swarm
-        uses: matchory/deployment@v1
+        uses: matchory/docker-swarm-deployment-action@v1
         env:
           DOCKER_CONTEXT: swarm
 ```
 
-## ⚙️ Configuration
+## ⚙ Configuration
 
 ### Inputs
 
 To configure the action, you can use the following inputs:
 
-| Input              | Default                               | Description                                                                                                                       |
-| :----------------- | :------------------------------------ | :-------------------------------------------------------------------------------------------------------------------------------- |
-| `stack-name`       | _Repository name_                     | The name of the stack to deploy. If not specified, the repository name (without the "user/" part) will be used.                   |
-| `version`          | _Tag Name&thinsp;/&thinsp;Commit SHA_ | The version of the stack to deploy. If not specified, the action will use the tag name or commit SHA of the build.                |
-| `compose-file`     | _—_                                   | The path to the compose file. If not specified, the action will [automatically search for it](#how-compose-file-detection-works). |
-| `env-var-prefix`   | `DEPLOYMENT_`                         | Prefix to resolve variables intended for [auto-configuration of variables](#smart-variable-resolution).                           |
-| `manage-variables` | `true`                                | Whether to automatically [manage configs and secrets](#configuring-secrets-and-configs).                                          |
-| `strict-variables` | `false`                               | Whether to throw an error if a variable specified in the compose spec is not defined.                                             |
-| `variables`        | _—_                                   | Variables as KEY=value pairs, newline-separated, or JSON object (e.g., `${{ toJSON(vars) }}`). Applies to environment.            |
-| `secrets`          | _—_                                   | Secrets as KEY=value pairs, newline-separated, or JSON object (e.g., `${{ toJSON(secrets) }}`). Higher priority than variables.   |
-| `exclude-variables`| _—_                                   | List of variable names to exclude from deployment, separated by newlines. Applies to all variable sources.                        |
-| `extra-variables`  | _—_                                   | Additional variables as KEY=value pairs, separated by newlines. Highest priority, overrides all other sources.                    |
-| `monitor`          | `false`                               | Whether to [monitor the stack](#post-deployment-monitoring) after deployment.                                                     |
-| `monitor-timeout`  | `300`                                 | The maximum time in seconds to wait for the stack to stabilize.                                                                   |
-| `monitor-interval` | `5`                                   | The interval in seconds to check the stack status.                                                                                |
-| `health-check-warnings` | `true`                           | Whether to emit [warnings for missing or suspect health checks](#health-check-validation).                                       |
+| Input                   | Default                               | Description                                                                                                                       |
+|:------------------------|:--------------------------------------|:----------------------------------------------------------------------------------------------------------------------------------|
+| `stack-name`            | _Repository name_                     | The name of the stack to deploy. If not specified, the repository name (without the "user/" part) will be used.                   |
+| `version`               | _Tag Name&thinsp;/&thinsp;Commit SHA_ | The version of the stack to deploy. If not specified, the action will use the tag name or commit SHA of the build.                |
+| `compose-file`          | _—_                                   | The path to the compose file. If not specified, the action will [automatically search for it](#how-compose-file-detection-works). |
+| `env-var-prefix`        | `DEPLOYMENT`                          | Prefix to resolve variables intended for [auto-configuration of variables](#smart-variable-resolution). Trailing `_` stripped.    |
+| `manage-variables`      | `true`                                | Whether to automatically [manage configs and secrets](#configuring-secrets-and-configs).                                          |
+| `strict-variables`      | `true`                                | Whether to throw an error if a variable specified in the compose spec is not defined.                                             |
+| `strict-compatibility`  | `false`                               | Whether to fail on Swarm-incompatible features. See [reconciliation](#compose-spec-to-swarm-reconciliation).                      |
+| `key-interpolation`     | `false`                               | Whether to interpolate variables in Compose Spec _keys_ too, not just values. See [interpolation](#variable-interpolation).       |
+| `variables`             | _—_                                   | Variables as KEY=value pairs, newline-separated, or JSON object (e.g., `${{ toJSON(vars) }}`). Applies to environment.            |
+| `secrets`               | _—_                                   | Secrets as KEY=value pairs, newline-separated, or JSON object (e.g., `${{ toJSON(secrets) }}`). Higher priority than variables.   |
+| `exclude-variables`     | _—_                                   | List of variable names to exclude from deployment, separated by newlines. Applies to every source except `extra-variables`.       |
+| `extra-variables`       | _—_                                   | Additional variables as KEY=value pairs, separated by newlines. Highest priority, overrides all other sources.                    |
+| `monitor`               | `false`                               | Whether to [monitor the stack](#post-deployment-monitoring) after deployment.                                                     |
+| `monitor-timeout`       | `300`                                 | The maximum time in seconds to wait for the stack to stabilize.                                                                   |
+| `monitor-interval`      | `5`                                   | The interval in seconds to check the stack status.                                                                                |
+| `health-check-warnings` | `true`                                | Whether to emit [warnings for missing or suspect health checks](#health-check-validation).                                        |
+| `upload-compose-spec`   | `true`                                | Whether to upload the final compose spec as a workflow artifact. It may contain interpolated variable values.                     |
 
 ### Outputs
 
 | Output         | Description                                                          |
-| :------------- | :------------------------------------------------------------------- |
+|:---------------|:---------------------------------------------------------------------|
 | `status`       | The status of the deployment. Possible values: `success`, `failure`. |
 | `stack-name`   | The name of the stack that was deployed.                             |
 | `version`      | The version of the stack that was deployed.                          |
 | `compose-spec` | The final compose specification used for the deployment.             |
 | `service-logs` | Logs of a failed service after deployment.                           |
 
+> **Note:** The `compose-spec` output is the _interpolated_ specification, so it
+> contains the resolved value of every variable it references, including any
+> supplied through the `secrets` input. It is **not** redacted: treat it as
+> sensitive, and do not write it anywhere you would not write a secret. The
+> uploaded artifact is different — `secrets` values are redacted there, and the
+> upload can be turned off entirely with `upload-compose-spec`.
+
 ## 📖 Reference
 
 ### How Compose File Detection Works
 
-If the `compose-file` input is not specified, the action automatically searches
-for your Compose File(s) in the following common locations and names, in
-descending order:
+If the `compose-file` input is not specified, the action automatically searches for your Compose File(s) in the
+following common locations and names, in descending order:
 
 1. `compose.production.yaml`
 2. `compose.production.yml`
@@ -164,27 +206,25 @@ descending order:
 19. `docker/docker-compose.yaml`
 20. `docker/docker-compose.yml`
 
-The first file found will be used. Modern `compose.*` files take priority over
-legacy `docker-compose.*` files, following the
-[Compose Specification](https://www.compose-spec.io/) standardized in 2021. This
-covers most standard project structures while maintaining full backward
-compatibility.
+The first file found will be used. Modern `compose.*` files take priority over legacy `docker-compose.*` files,
+following the
+[Compose Specification](https://www.compose-spec.io/) standardized in 2021. This covers most standard project structures
+while maintaining full backward compatibility.
 
 #### Using environment variables
 
-The action also respects the `COMPOSE_FILE` environment variable if set, and
-multiple files specified there or via the `compose-file` input can be separated
-by the `COMPOSE_FILE_SEPARATOR` environment variable (defaults to `:`).
+The action also respects the `COMPOSE_FILE` environment variable if set, and multiple files specified there or via the
+`compose-file` input can be separated by the `COMPOSE_PATH_SEPARATOR` environment variable (defaults to `:`). If the
+value contains newlines and `COMPOSE_PATH_SEPARATOR` is not set, newlines are used as the separator instead.
 
 #### Specifying a Custom Compose File, or Multiple Files
 
-If your Compose File doesn't follow the automatic detection pattern, or you need
-to use multiple Compose Files (which will be merged), use the compose-file
-input:
+If your Compose File doesn't follow the automatic detection pattern, or you need to use multiple Compose Files (which
+will be merged), use the compose-file input:
 
 ```yaml
 - name: Deploy with Custom Compose File
-  uses: your-github-username/your-repo-name@v1
+  uses: matchory/docker-swarm-deployment-action@v1
   with:
     stack-name: my-application
     compose-file: path/to/your/custom-compose.yaml
@@ -194,7 +234,7 @@ To use multiple files, separate them with newlines:
 
 ```yaml
 - name: Deploy with Multiple Compose Files
-  uses: your-github-username/your-repo-name@v1
+  uses: matchory/docker-swarm-deployment-action@v1
   with:
     stack-name: my-application
     compose-file: |
@@ -203,33 +243,77 @@ To use multiple files, separate them with newlines:
 ```
 
 You can also use a custom delimiter (defaults to `:`) by setting the
-`COMPOSE_FILE_SEPARATOR` environment variable.
+`COMPOSE_PATH_SEPARATOR` environment variable.
 
 ### How Compose Files Are Processed
 
-The action is designed to be flexible and robust when it comes to your Compose
-files. It doesn't strictly require either the old v3 format or the new Compose
-Specification. Instead, it:
+The action is designed to be flexible and robust when it comes to your Compose files. It doesn't strictly require either
+the old v3 format or the new Compose Specification. Instead, it:
 
 - Reads your specified (or detected) Compose File(s).
-- Applies internal transformations to handle known differences between formats
-  for Swarm compatibility.
-- Uses `docker stack config` to validate the resulting configuration and merge
-  multiple files into a single, canonical Compose Specification.
+- Applies internal transformations to handle known differences between formats for Swarm compatibility.
+- Uses `docker stack config` to validate the resulting configuration and merge multiple files into a single, canonical
+  Compose Specification.
 
-This ensures that regardless of the exact format you use (even mixing them), the
-final configuration passed to `docker stack deploy` is valid and correctly
-interpreted by Docker Swarm.
+This ensures that regardless of the exact format you use (even mixing them), the final configuration passed to
+`docker stack deploy` is valid and correctly interpreted by Docker Swarm.
+
+#### Compose-Spec to Swarm Reconciliation
+
+Modern Compose Specification constructs (like `develop`, `gpus`, or `label_file`) aren't understood by
+`docker stack config`, which hard-fails the moment it sees them. Before validation, the action reconciles your Compose
+Spec into a form Swarm understands: supported shorthands are translated automatically, unsupported features are stripped
+with a warning, and unknown or misspelled keys are flagged with a "did you mean?" hint.
+
+Set `strict-compatibility: true` to fail the deploy when a feature had to be **stripped** (e.g. `develop`, `profiles`,
+`provider`) or a translation **conflicted** with an existing `deploy.*` value. Kept-but-ignored keys (`build`,
+`container_name`) and heuristic unknown-key hints stay advisory and never fail the build — `docker
+stack config` remains the authoritative validator.
+
+Translated resource (`mem_limit`, `mem_reservation`, `cpus`) and `restart` values are non-clobbering: if the equivalent
+`deploy.*` value is already set explicitly, it always wins over the shorthand.
+`label_file` paths resolve relative to the compose file's own directory and are confined to the workspace; an unreadable
+file is warned about, not fatal.
+
+| Compose key                   | Handling                             | Swarm result                                                                                                                                  |
+|-------------------------------|--------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------|
+| `mem_limit`                   | Translated                           | `deploy.resources.limits.memory`                                                                                                              |
+| `mem_reservation`             | Translated                           | `deploy.resources.reservations.memory`                                                                                                        |
+| `cpus`                        | Translated                           | `deploy.resources.limits.cpus`                                                                                                                |
+| `restart`                     | Translated                           | `deploy.restart_policy` (`no`→`none`, `always`/`unless-stopped`→`any`, `on-failure`→`on-failure`; `on-failure:N` also sets `max_attempts: N`) |
+| `depends_on` (map/conditions) | Translated                           | converted to list form; conditions dropped (swarm has no ordering)                                                                            |
+| `label_file`                  | Translated                           | contents merged into `labels` (explicit labels win)                                                                                           |
+| `container_name`              | Kept + warned                        | ignored by swarm (tasks are named automatically)                                                                                              |
+| `build`                       | Kept + warned                        | ignored by swarm (provide a pre-built `image`)                                                                                                |
+| `develop`                     | Stripped + warned                    | no swarm equivalent (dev-only watch config)                                                                                                   |
+| `post_start` / `pre_stop`     | Stripped + warned                    | lifecycle hooks unsupported by swarm                                                                                                          |
+| `profiles`                    | Stripped + warned                    | unsupported; all services are always deployed                                                                                                 |
+| `memswap_limit`               | Stripped + warned                    | no swarm swap-limit control                                                                                                                   |
+| `gpus`                        | Stripped + warned                    | use `deploy.resources.reservations.generic_resources` + node labels                                                                           |
+| `provider`                    | Service dropped + warned             | provider services cannot run on swarm                                                                                                         |
+| `models` (top-level)          | Stripped + warned                    | model runner unsupported by swarm                                                                                                             |
+| Unknown/misspelled keys       | Warned (with a "did you mean?" hint) | left untouched; may still fail `docker stack config`                                                                                          |
+
+##### `!reset` / `!override` merge tags
+
+Compose files may use the standard `!reset` and `!override` merge tags to
+control how base and override files combine. When present, the action
+merges the files with `docker compose config` (which honors the tags),
+then reconciles the tag-free merged result for Swarm — so these tags work
+even on keys the action rewrites (`restart`, `mem_limit`, `depends_on`,
+`label_file`, and `deploy`). Only the secret/config `content:` transform
+runs before the merge. This requires the Docker Compose v2 plugin on the
+runner (included on GitHub-hosted runners); if it is missing and these
+tags are used, the action fails with a clear error rather than merging
+incorrectly.
 
 #### Variable interpolation
 
-All environment variables inside the Compose Spec(s) will be interpolated
-automatically according to the
-[Compose Specification rules](https://docs.docker.com/reference/compose-file/interpolation/),
-with one optional improvement: If you enable the `key-interpolation` input, the
-action will also replace environment variables in all keys in your Compose Spec,
-not just in values. This is useful for dynamic service names or other keys that
-depend on environment variables.
+All environment variables inside the Compose Spec(s) will be interpolated automatically according to the
+[Compose Specification rules](https://docs.docker.com/reference/compose-file/interpolation/), with one optional
+improvement: If you enable the `key-interpolation` input, the action will also replace environment variables in all keys
+in your Compose Spec, not just in values. This is useful for dynamic service names or other keys that depend on
+environment variables.
 
 The following syntax is supported for variable interpolation:
 
@@ -244,17 +328,16 @@ The following syntax is supported for variable interpolation:
 - "${VARIABLE_NAME:?error if not set or empty}"
 ```
 
-In contrast to the legacy Compose File v3 format, the Compose Specification (and
-the implementation in this action) do allow for unlimited recursive
-interpolation, meaning that the following will work as expected:
+In contrast to the legacy Compose File v3 format, the Compose Specification (and the implementation in this action) do
+allow for unlimited recursive interpolation, meaning that the following will work as expected:
 
 ```yaml
 - "${FOO:-${BAR:-${BAZ}}}"
 ```
 
 In addition to all variables in the process environment and those
-[passed in the `variables` input](#providing-github-secrets-and-variables), the
-following variables derived from the inputs are also available:
+[passed in the `variables` input](#providing-github-secrets-and-variables), the following variables derived from the
+inputs are also available:
 
 - `MATCHORY_DEPLOYMENT_STACK`: The name of the stack being deployed.
 - `MATCHORY_DEPLOYMENT_VERSION`: The version of the stack being deployed.
@@ -263,14 +346,12 @@ following variables derived from the inputs are also available:
 
 #### Loading Environment Variables or inline Content
 
-Docker Swarm only supports reading configs and secrets from files, but the
-Compose Specification allows you to use the
+Docker Swarm only supports reading configs and secrets from files, but the Compose Specification allows you to use the
 [`environment`](https://docs.docker.com/reference/compose-file/secrets/#example-2)
 and
 [`content`](https://docs.docker.com/reference/compose-file/configs/#example-2)
-properties to load them from environment variables or inline content,
-respectively. This action automatically converts these properties to files, so
-you can use them in your Compose File without worrying about the deployment.
+properties to load them from environment variables or inline content, respectively. This action automatically converts
+these properties to files, so you can use them in your Compose File without worrying about the deployment.
 
 For example, if you have a Compose File with the following configs:
 
@@ -282,9 +363,8 @@ configs:
     content: root
 ```
 
-The action will automatically create files for these configs, and the resulting
-specification file passed to the actual `docker stack deploy` call will look
-like this:
+The action will automatically create files for these configs, and the resulting specification file passed to the actual
+`docker stack deploy` call will look like this:
 
 ```yaml
 configs:
@@ -296,61 +376,57 @@ configs:
     # omitting rest for brevity
 ```
 
-The action will create the files in the same directory as the Compose File and
-append a unique identifier to the filename to avoid conflicts. The files will be
-removed after the deployment is complete, so you don't have to worry about
-leaving temporary files behind to the next action.
+The action will create the files in the working directory and append a unique identifier to the filename to avoid
+conflicts. The files are removed once the deployment no longer needs them — including when the deployment fails — so no
+plain variable values are left behind for a later job to read.
 
 #### Smart Variable Resolution
 
 You don't have to specify the data source (`file`, `environment`, or `content`)
-manually: In fact, you don't have to add any properties at all! The following
-example will work just as well:
+manually: In fact, you don't have to add any properties at all! The following example will work just as well:
 
 ```yaml
 configs:
   # Pass an empty object, …
-  app_url: {}
+  app_url: { }
 
   # …or even a YAML-null value for brevity!
   database_username: ~
 ```
 
-The action will attempt to resolve the variable content automatically, and
-populate the `file` property with that. This is done by the following rules:
+The action will attempt to resolve the variable content automatically, and populate the `file` property with that. The
+prefix used below is the `env-var-prefix` input (`DEPLOYMENT` by default); a trailing underscore is stripped from it, and
+it is joined to the variable name with a single `_`. Resolution follows these rules:
 
-1. If a file with the name of the variable exists in working directory named
-   like the variable key with the suffix ".secret" (e.g. `./app_url.secret`), it
-   will be used as the file source.
-2. If an environment variable with one of the following name patterns exists, it
-   will be used as the environment source:n
-   - Exact variable key (e.g. `app_url`)
-   - Uppercase variable key (e.g. `APP_URL`)
-   - Variable key prefixed with the [`envVarPrefix`](#inputs) (e.g.
-     `DEPLOYMENT_app_url`)
-   - Uppercase variable key prefixed with the [env var prefix setting](#inputs)
-     (e.g. `DEPLOYMENT_APP_URL`)
-   - Variable key prefixed with the [stack name](#inputs) (e.g.
-     `my_repo_app_url`)
-   - Uppercase variable key prefixed with the [stack name](#inputs) (e.g.
-     `MY_REPO_APP_URL`)
-3. If neither of the above is found, an error will be thrown and the action will
-   fail.
+1. If a file named after the variable key with the suffix `.secret` exists in the working directory (e.g.
+   `./app_url.secret`), it will be used as the file source.
+2. If an environment variable with one of the following name patterns exists, it will be used as the environment source:
+
+    - Exact variable key (e.g. `app_url`)
+    - Uppercase variable key (e.g. `APP_URL`)
+    - Variable key prefixed with the [`envVarPrefix`](#inputs) (e.g.
+      `DEPLOYMENT_app_url`)
+    - Uppercase variable key prefixed with the [env var prefix setting](#inputs)
+      (e.g. `DEPLOYMENT_APP_URL`)
+    - Variable key prefixed with the [stack name](#inputs) (e.g.
+      `my_repo_app_url`)
+    - Uppercase variable key prefixed with the [stack name](#inputs) (e.g.
+      `MY_REPO_APP_URL`)
+3. If neither of the above is found, an error will be thrown and the action will fail.
 
 #### Providing GitHub Secrets and Variables
 
-You can use GitHub Secrets and Variables to provide the values for your configs.
-This action supports multiple ways to pass variables, making it easy to work with
-both individual variables and bulk repository configuration.
+You can use GitHub Secrets and Variables to provide the values for your configs. This action supports multiple ways to
+pass variables, making it easy to work with both individual variables and bulk repository configuration.
 
 ##### Using JSON input (Recommended)
 
-The easiest way to pass all repository secrets and variables is using JSON input.
-This approach eliminates the need to list each variable individually:
+The easiest way to pass all repository secrets and variables is using JSON input. This approach eliminates the need to
+list each variable individually:
 
 ```yaml
 - name: Deploy to Docker Swarm
-  uses: matchory/deployment@v1
+  uses: matchory/docker-swarm-deployment-action@v1
   with:
     stack-name: my-application
     # Pass all repository variables as JSON
@@ -369,12 +445,12 @@ This approach eliminates the need to list each variable individually:
 
 ##### Using key-value pairs
 
-You can also use the traditional approach with explicit key-value pairs.
-This gives you fine-grained control over which variables to include:
+You can also use the traditional approach with explicit key-value pairs. This gives you fine-grained control over which
+variables to include:
 
 ```yaml
 - name: Deploy to Docker Swarm
-  uses: matchory/deployment@v1
+  uses: matchory/docker-swarm-deployment-action@v1
   with:
     stack-name: my-application
     variables: |
@@ -386,20 +462,21 @@ This gives you fine-grained control over which variables to include:
 
 ##### Variable priority and merging
 
-When using multiple input sources, variables are merged with the following priority
-(later sources override earlier ones):
+When using multiple input sources, variables are merged with the following priority (later sources override earlier
+ones):
 
 1. **Environment variables** (lowest priority)
 2. **`variables` input** (JSON or key-value)
 3. **`secrets` input** (JSON or key-value)
 4. **`extra-variables` input** (highest priority)
 
-The `exclude-variables` filter is applied after all merging is complete.
+The `exclude-variables` filter is applied after the environment, `variables`, and `secrets` sources have been merged,
+but **before** `extra-variables`. Variables passed via `extra-variables` therefore cannot be excluded.
 
 ##### Setting multi-line variables
 
-Multi-line variables (e.g., PEM keys or certificates) are supported in key-value
-inputs using HEREDOC syntax [similar to `$GITHUB_ENV`](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-commands#multiline-strings):
+Multi-line variables (e.g., PEM keys or certificates) are supported in key-value inputs using HEREDOC syntax [similar to
+`$GITHUB_ENV`](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-commands#multiline-strings):
 
 ```yaml
 variables: |
@@ -419,7 +496,7 @@ You can mix JSON and key-value formats as needed:
 ```yaml
 # Example: Use JSON for bulk config, key-value for specific overrides
 - name: Deploy to Docker Swarm
-  uses: matchory/deployment@v1
+  uses: matchory/docker-swarm-deployment-action@v1
   with:
     variables: ${{ toJSON(vars) }}           # All repository variables
     secrets: ${{ toJSON(secrets) }}          # All repository secrets  
@@ -433,14 +510,12 @@ You can mix JSON and key-value formats as needed:
 
 #### Automatic Rotation
 
-A major pain point deploying applications to Docker Swarm is managing secrets
-and configs (henceforth called _"variables"_), which are designed to be
-immutable and cannot be updated in place. This action automates the process of
+A major pain point deploying applications to Docker Swarm is managing secrets and configs (henceforth called _"
+variables"_), which are designed to be immutable and cannot be updated in place. This action automates the process of
 creating new variables when deploying and updating the stack to use them.  
-To make this work, the action detects changes to the _content_ of variables
-referenced in the Compose File by storing their SHA256 hash in a label on the
-variable and appending it to the full name. For example, given the following
-config in the Compose File:
+To make this work, the action detects changes to the _content_ of variables referenced in the Compose File by storing
+their SHA256 hash in a label on the variable and appending it to the full name. For example, given the following config
+in the Compose File:
 
 ```yaml
 configs:
@@ -462,43 +537,35 @@ configs:
       com.matchory.deployment.version: VERSION
 ```
 
-_(`YOUR_STACK` and `VERSION` are placeholders for the actual stack name and
-version as defined in the settings)_
+_(`YOUR_STACK` and `VERSION` are placeholders for the actual stack name and version as defined in the settings)_
 
 This has two notable implications:
 
-1. As the short SHA256 hash is appended to the variable name, it will stay
-   stable if the content doesn't change across deployments, which avoids
-   unnecessary updates to the stack. If the database username stays root, the
-   stack will continue to use the variable created in the initial deployment,
-   even if other variables or settings are updated.
-2. After the deployment is complete, the action will prune any unused variables
-   by checking the labels. If a variable is not referenced in the Compose File
-   anymore, it will be safely removed from the cluster. This is important to
-   keep the cluster clean and avoid cluttering it with old variables.
+1. As the short SHA256 hash is appended to the variable name, it will stay stable if the content doesn't change across
+   deployments, which avoids unnecessary updates to the stack. If the database username stays root, the stack will
+   continue to use the variable created in the initial deployment, even if other variables or settings are updated.
+2. After the deployment is complete, the action will prune any unused variables by checking the labels. If a variable is
+   not referenced in the Compose File anymore, it will be safely removed from the cluster. This is important to keep the
+   cluster clean and avoid cluttering it with old variables.
 
 #### Configuring the Variable Name
 
-The deployment action will automatically construct the variable name from the
-following template:
+The deployment action will automatically construct the variable name from the following template:
 
 ```typescript
 `${stackName}-${variableName}-${hash.slice(0, 7)}`;
 ```
 
-As the name must be globally unique, this includes the stack name, the name of
-the variable (the key in the Compose File), and the first seven characters of
-the hash. This ensures that even if two stacks use the same variable name, they
+As the name must be globally unique, this includes the stack name, the name of the variable (the key in the Compose
+File), and the first seven characters of the hash. This ensures that even if two stacks use the same variable name, they
 will not conflict.  
-If you provide a custom name for the variable, it will be used verbatim, but
-**the hash will still be appended**. This is necessary to enable automatic
-change detection and pruning.
+If you provide a custom name for the variable, it will be used verbatim, but **the hash will still be appended**. This
+is necessary to enable automatic change detection and pruning.
 
 #### Disabling Automatic Variable Management
 
-If you want to manage your variables manually, you can either disable the
-automatic variable management altogether by setting the `manage-variables` input
-to `false`, or you can add the `com.matchory.deployment.ignore` label to the
+If you want to manage your variables manually, you can either disable the automatic variable management altogether by
+setting the `manage-variables` input to `false`, or you can add the `com.matchory.deployment.ignore` label to the
 variable:
 
 ```yaml
@@ -509,18 +576,15 @@ configs:
       com.matchory.deployment.ignore: "true"
 ```
 
-This will prevent the action from touching the variable, and it will not be
-pruned after the deployment. Note that this will also disable the automatic
-conversion of compose-spec-style inputs from `content` or `environment`.
+This will prevent the action from touching the variable, and it will not be pruned after the deployment. Note that this
+will also disable the automatic conversion of compose-spec-style inputs from `content` or `environment`.
 
 #### Data Transformation
 
-You can optionally transform the data of your configs and secrets during the
-deployment process using labels in your Compose File. This is useful for
-handling sensitive data that might be stored in an encoded format.  
+You can optionally transform the data of your configs and secrets during the deployment process using labels in your
+Compose File. This is useful for handling sensitive data that might be stored in an encoded format.  
 Add either the `com.matchory.deployment.encode` or
-`com.matchory.deployment.decode` label to your config or secret definition,
-specifying one of the supported formats:
+`com.matchory.deployment.decode` label to your config or secret definition, specifying one of the supported formats:
 
 - `base64`
 - `base64url`
@@ -537,11 +601,10 @@ configs:
       com.matchory.deployment.decode: "base64"
 ```
 
-This will decode the variable before passing it to the container, resulting in a
-properly formatted, multi-line PEM key in the container file system.
+This will decode the variable before passing it to the container, resulting in a properly formatted, multi-line PEM key
+in the container file system.
 
-Do you have a different encoding in mind? Feel free to open an issue or PR, and
-we can add it to the action.
+Do you have a different encoding in mind? Feel free to open an issue or PR, and we can add it to the action.
 
 ### How the stack is deployed
 
@@ -549,48 +612,45 @@ To deploy the final specification, the action uses the `docker stack deploy`
 command effectively like this:
 
 ```shell
-echo $final_schema | docker stack deploy \
+echo $final_spec | docker stack deploy \
      --resolve-image=always \
      --with-registry-auth \
      --compose-file "-" \
-     --detach \
+     --detach=true \
+     --quiet \
      --prune \
   $stack_name
 ```
 
 ### Post-Deployment Monitoring
 
-The action can optionally monitor your stacks for any post-deployment issues
-(e.g., restart cycles or rollbacks) and fail the deployment accordingly. This is
-done by checking the status of the services in the stack after the deployment,
+The action can optionally monitor your stacks for any post-deployment issues (e.g., restart cycles or rollbacks) and
+fail the deployment accordingly. This is done by checking the status of the services in the stack after the deployment,
 waiting until all services are running and stable.  
-Especially for bigger deployments, this can take a while, so the monitoring
-feature is disabled by default. You can enable it by setting the `monitor` input
-to `true`.
+Especially for bigger deployments, this can take a while, so the monitoring feature is disabled by default. You can
+enable it by setting the `monitor` input to `true`.
 
 **Note that a monitoring failure will _not_ automatically roll back the stack.**
-Swarm takes care of that itself. Stack Monitoring solves a different problem: It
-makes sure an update to a stack is not only successful, but also stable, that
-is, it doesn't roll back or restart any services after the deployment. If that
-happens, and the stack does not stabilize, monitoring will fail the action and
-notify you of the issue.
+Swarm takes care of that itself. Stack Monitoring solves a different problem: It makes sure an update to a stack is not
+only successful, but also stable, that is, it doesn't roll back or restart any services after the deployment. If that
+happens, and the stack does not stabilize, monitoring will fail the action and notify you of the issue.
 
 #### Monitoring Timeout & Interval
 
-The action will wait for a configurable maximum of `monitor-timeout` seconds for
-the services to stabilize, checking their status every `monitor-interval`
+The action will wait for a configurable maximum of `monitor-timeout` seconds for the services to stabilize, checking
+their status every `monitor-interval`
 seconds. The default values are 5 minutes and 5 seconds, respectively.
 
-You can adjust these values to suit your needs. For example, if you want to wait
-for 10 minutes and check every 30 seconds, you can set the following inputs:
+You can adjust these values to suit your needs. For example, if you want to wait for 10 minutes and check every 30
+seconds, you can set the following inputs:
 
 ```yaml
 jobs:
   deploy:
+    runs-on: ubuntu-latest
     steps:
       - name: Deploy to Docker Swarm
-        uses: matchory/deployment@v1
-        uses: matchory/deployment@v1
+        uses: matchory/docker-swarm-deployment-action@v1
         with:
           monitor: true
           monitor-timeout: 600 # 10 minutes
@@ -599,10 +659,8 @@ jobs:
 
 ### Health Check Validation
 
-The action validates health check configurations in your compose spec before
-deploying, emitting warnings for common issues. This helps catch
-misconfigurations early rather than debugging failing containers
-post-deployment.
+The action validates health check configurations in your compose spec before deploying, emitting warnings for common
+issues. This helps catch misconfigurations early rather than debugging failing containers post-deployment.
 
 **Missing health checks:** A warning is emitted for any service that has no
 `healthcheck` defined, or has it explicitly disabled (`test: ["NONE"]` or
@@ -612,27 +670,62 @@ post-deployment.
 
 - **interval < timeout** — the health check will overlap with itself
 - **retries: 1** — a single failure marks the container unhealthy
-- **No start_period with short interval (< 10s)** — the container may fail
-  checks before it is ready
+- **No start_period with short interval (< 10s)** — the container may fail checks before it is ready
 
 To suppress these warnings, set `health-check-warnings` to `false`:
 
 ```yaml
 - name: Deploy to Docker Swarm
-  uses: matchory/deployment@v1
+  uses: matchory/docker-swarm-deployment-action@v1
   with:
     health-check-warnings: false
 ```
 
 #### Health Check Details in Failure Reports
 
-When monitoring is enabled and a service fails due to a health check issue,
-the failure report includes the health check configuration (test command,
-interval, timeout, retries, start period) alongside the task history and
-container logs. This appears in both the action log output and the GitHub
-Actions job summary.
+When monitoring is enabled and a service fails due to a health check issue, the failure report includes the health check
+configuration (test command, interval, timeout, retries, start period) alongside the task history and container logs.
+This appears in both the action log output and the GitHub Actions job summary.
 
 ## 🔨 Contributing
 
-Contributions are welcome! If you have any ideas, suggestions, or bug reports,
-please open an issue or a pull request.
+Contributions are welcome! If you have any ideas, suggestions, or bug reports, please open an issue or a pull request.
+
+### Development Setup
+
+The action is written in TypeScript and runs on Node 24. After cloning, install the dependencies:
+
+```shell
+npm install
+```
+
+The following scripts are available:
+
+| Task                  | Command                |
+|:----------------------|:-----------------------|
+| Run the full pipeline | `npm run all`          |
+| Run the tests         | `npm run test`         |
+| Type-check            | `npm run typecheck`    |
+| Lint                  | `npm run lint`         |
+| Check formatting      | `npm run format:check` |
+| Fix formatting        | `npm run format:write` |
+| Bundle the action     | `npm run package`      |
+
+Linting and formatting are handled by [Biome](https://biomejs.dev/), and the tests run on
+[Vitest](https://vitest.dev/).
+
+### Before Opening a Pull Request
+
+Two things are easy to miss:
+
+- **The `dist/` directory is committed.** [@vercel/ncc](https://github.com/vercel/ncc) bundles the TypeScript sources
+  into a single file that the Actions runner executes, so `npm run package` has to run after any change under `src/`.
+  A dedicated CI workflow fails the build if `dist/` is out of date.
+- **`npm run all` should pass locally.** It chains formatting, linting, type-checking, tests, the coverage badge, and
+  the bundle — the same steps CI runs.
+
+If you changed dependencies, run `npm install` so `package-lock.json` stays in sync; `npm ci` fails otherwise.
+
+## 📄 License
+
+Released under the [MIT License](./LICENSE).

@@ -81,6 +81,13 @@ inputs:
       is useful for ensuring that the action fails if a file variable source is
       not found.
     default: "true"
+  strict-compatibility:
+    description: >-
+      Whether to fail the deployment when the Compose Specification contains
+      features that Docker Swarm does not support and cannot be translated
+      (e.g. develop, profiles, provider). When false (the default), such
+      features are stripped or translated with a warning instead of failing.
+    default: "false"
   key-interpolation:
     description: >-
       Whether to enable interpolation of environment variables within keys in
@@ -105,12 +112,25 @@ inputs:
       Whether to emit warnings for missing or suspect health check
       configurations in compose services.
     default: "true"
+  upload-compose-spec:
+    description: >-
+      Whether to upload the final interpolated Compose Specification as a
+      workflow artifact after a successful deployment. The artifact may contain
+      variable values and is readable by anyone with repository access. This
+      governs the artifact only: the `compose-spec` output is written either
+      way.
+    default: "true"
 
 outputs:
   status:
     description: "Deployment status"
   compose-spec:
-    description: "Docker Compose spec used for deployment"
+    description: >-
+      Docker Compose spec used for deployment. This is the interpolated spec, so
+      it contains the resolved values of every variable it references, including
+      any supplied through the `secrets` input. It is not redacted -- treat it as
+      sensitive and do not write it anywhere the surrounding job would not put a
+      secret. The uploaded artifact, by contrast, has `secrets` values redacted.
   stack-name:
     description: "Name of the stack deployed"
   version:

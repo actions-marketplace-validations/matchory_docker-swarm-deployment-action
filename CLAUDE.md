@@ -75,15 +75,29 @@ Docker never triggers a rollback.
 
 ## CI
 
-Three workflows run on push to main: `ci.yml` (tests),
-`linter.yml` (super-linter), `licensed.yml` (license compliance).
+Four workflows run on push to main: `ci.yml` (tests),
+`linter.yml` (super-linter), `licensed.yml` (license compliance),
+and `check-dist.yml` (rebuilds `dist/` and fails if the committed
+bundle is stale).
+
+`dist/` and `.licenses/` are both derived from `package-lock.json`,
+so a dependency bump alone makes `check-dist.yml` and
+`licensed.yml` fail. `regenerate-artifacts.yml` handles that: it
+runs on pushes to main that touch `package.json` or
+`package-lock.json`, regenerates both, and opens a pull request.
+It runs post-merge rather than on the Dependabot PR because
+Dependabot-triggered runs get a read-only token. Note that pull
+requests it opens do not trigger other workflows, since they are
+created with `GITHUB_TOKEN`.
+
+`licensed.yml` only reports; it never writes to `.licenses/`.
 
 Super-linter excludes `dist/`, `docs/superpowers/`, and
 `.licenses/` directories. Markdown files must follow the config in
-`.github/linters/.markdown-lint.yml` (80 char line length, tables
-exempt).
+`.github/linters/.markdown-lint.yml` (120 char line length, tables
+exempt, dash bullets, underscore emphasis).
 
-`release.yml` triggers on semver tags (`v*.*.*`), updates rolling
+`release.yml` triggers on SemVer tags (`v*.*.*`), updates rolling
 `vN` and `vN.N` tags, and creates a GitHub release.
 
 ## Tooling

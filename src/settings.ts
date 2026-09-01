@@ -13,8 +13,17 @@ export interface Settings {
   monitor: boolean;
   monitorInterval: number;
   monitorTimeout: number;
+  /**
+   * Values that came from the `secrets` input, keyed by variable name
+   *
+   * Used to redact copies of the spec that leave the job; see
+   * `redactSecretValues` for why, and for what is deliberately not redacted.
+   */
+  secretValues: ReadonlyMap<string, string>;
   stack: string;
+  strictCompatibility: boolean;
   strictVariables: boolean;
+  uploadComposeSpec: boolean;
   variables: Map<string, string>;
   version: string;
 }
@@ -31,7 +40,7 @@ export function parseSettings(env: NodeJS.ProcessEnv) {
 
   const stack = inferStackName(getInput("stack-name"), env);
   const version = inferVersion(getInput("version"), env);
-  const variables = inferVariables(
+  const { variables, secretValues } = inferVariables(
     {
       variables: getInput("variables"),
       secrets: getInput("secrets"),
@@ -45,27 +54,86 @@ export function parseSettings(env: NodeJS.ProcessEnv) {
   variables.set("MATCHORY_DEPLOYMENT_STACK", stack);
   variables.set("MATCHORY_DEPLOYMENT_VERSION", version);
 
+  const healthCheckWarnings =
+    getBooleanInput("health-check-warnings", { required: false }) ?? true;
+  const keyInterpolation =
+    getBooleanInput("key-interpolation", { required: false }) ?? false;
+  const manageVariables =
+    getBooleanInput("manage-variables", { required: false }) ?? true;
+  const monitor = getBooleanInput("monitor", { required: false }) ?? false;
+  const strictCompatibility =
+    getBooleanInput("strict-compatibility", { required: false }) ?? false;
+  const strictVariables =
+    getBooleanInput("strict-variables", { required: false }) ?? true;
+  const uploadComposeSpec =
+    getBooleanInput("upload-compose-spec", { required: false }) ?? true;
+
   return defineSettings({
     composeFiles: inferComposeFiles(getInput("compose-file"), env),
     envVarPrefix: (getInput("env-var-prefix") || "DEPLOYMENT").replace(
       /_$/,
       "",
     ),
-    healthCheckWarnings:
-      getBooleanInput("health-check-warnings", { required: false }) ?? true,
-    keyInterpolation:
-      getBooleanInput("key-interpolation", { required: false }) ?? false,
-    manageVariables:
-      getBooleanInput("manage-variables", { required: false }) ?? true,
-    monitor: getBooleanInput("monitor", { required: false }) ?? false,
-    monitorInterval: parseInt(getInput("monitor-interval") || "5", 10),
-    monitorTimeout: parseInt(getInput("monitor-timeout") || "300", 10),
+    healthCheckWarnings,
+    keyInterpolation,
+    manageVariables,
+    monitor,
+    monitorInterval: parsePositiveSeconds(
+      getInput("monitor-interval"),
+      "monitor-interval",
+      5,
+      monitor,
+    ),
+    monitorTimeout: parsePositiveSeconds(
+      getInput("monitor-timeout"),
+      "monitor-timeout",
+      300,
+      monitor,
+    ),
+    secretValues,
     stack,
-    strictVariables:
-      getBooleanInput("strict-variables", { required: false }) ?? true,
+    strictCompatibility,
+    strictVariables,
+    uploadComposeSpec,
     variables,
     version,
   });
+}
+
+// Parse a whole-second duration input. An unset input falls back to the
+// default; a non-numeric or non-positive value is rejected up front, because a
+// NaN interval/timeout would otherwise make the monitor loop hang silently
+// (`elapsed >= NaN` is always false) with no indication of why.
+// Rejecting only applies when monitoring is enabled, since the value is never
+// read otherwise: failing on an unused input would break existing workflows
+// that already pass one.
+function parsePositiveSeconds(
+  raw: string,
+  input: string,
+  fallback: number,
+  monitor: boolean,
+): number {
+  if (!raw) {
+    return fallback;
+  }
+
+  // Only plain digits are accepted. `Number.parseInt` would silently truncate
+  // instead of rejecting: it reads "5.9" as 5, "10s" as 10, and "1e3" as 1 --
+  // a thousandth of the duration the author asked for.
+  const value = /^\d+$/.test(raw) ? Number(raw) : Number.NaN;
+
+  if (!Number.isInteger(value) || value <= 0) {
+    if (!monitor) {
+      return fallback;
+    }
+
+    throw new Error(
+      `The "${input}" input must be a positive whole number of seconds, ` +
+        `but received "${raw}".`,
+    );
+  }
+
+  return value;
 }
 
 function inferStackName(name: string | undefined, env: NodeJS.ProcessEnv) {
@@ -130,16 +198,15 @@ function inferVariables(inputs: VariableInputs, env: NodeJS.ProcessEnv) {
   }
 
   // Step 3: Parse and merge secrets (higher priority than variables)
-  if (inputs.secrets) {
-    const parsedSecrets = parseVariableInput(inputs.secrets);
-    for (const [key, value] of parsedSecrets) {
-      // Ensure secrets are masked in output
-      if (value) {
-        setSecret(value);
-      }
+  const parsedSecrets = parseVariableInput(inputs.secrets ?? "");
 
-      variables.set(key, value);
+  for (const [key, value] of parsedSecrets) {
+    // Ensure secrets are masked in output
+    if (value) {
+      setSecret(value);
     }
+
+    variables.set(key, value);
   }
 
   // Step 4: Apply exclusions (before extra variables to ensure they have highest priority)
@@ -162,7 +229,17 @@ function inferVariables(inputs: VariableInputs, env: NodeJS.ProcessEnv) {
     }
   }
 
-  return variables;
+  // Derived last, so it cannot disagree with `variables`: exclusions can drop a
+  // secret's name, and extra-variables can overwrite its value with one that is
+  // not secret. Either way the name no longer resolves to a secret value, and
+  // redacting it would rewrite something that is not sensitive.
+  const secretValues = new Map(
+    [...parsedSecrets].filter(
+      ([key, value]) => value && variables.get(key) === value,
+    ),
+  );
+
+  return { variables, secretValues };
 }
 
 function parseVariableInput(input: string): Map<string, string> {

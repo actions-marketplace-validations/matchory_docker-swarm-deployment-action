@@ -5,6 +5,8 @@ import * as core from "@actions/core";
 import type { ComposeSpec } from "./compose";
 import { deploy } from "./deployment.js";
 import { parseSettings } from "./settings.js";
+import { removeFileQuietly } from "./utils.js";
+import { redactSecretValues } from "./variables.js";
 
 export async function run() {
   const settings = parseSettings(env);
@@ -31,8 +33,14 @@ export async function run() {
     return;
   }
 
+  if (!settings.uploadComposeSpec) {
+    core.info("Compose spec artifact upload is disabled");
+
+    return;
+  }
+
   try {
-    await storeComposeSpecArtifact(composeSpec);
+    await storeComposeSpecArtifact(composeSpec, settings.secretValues);
   } catch (cause) {
     const message = cause instanceof Error ? cause.message : String(cause);
     core.warning(
@@ -43,27 +51,38 @@ export async function run() {
   }
 }
 
-async function storeComposeSpecArtifact(spec: ComposeSpec) {
+async function storeComposeSpecArtifact(
+  spec: ComposeSpec,
+  secretValues: ReadonlyMap<string, string>,
+) {
   const artifactClient = new DefaultArtifactClient();
   const path = `./compose-spec.generated.${crypto.randomUUID()}.json`;
 
-  try {
-    await writeFile(path, JSON.stringify(spec, null, 2));
-  } catch (cause) {
-    const message = cause instanceof Error ? cause.message : String(cause);
-    throw new Error(`Failed to write compose spec to file: ${message}`, {
-      cause,
-    });
-  }
+  // Redacted here, not at the call site, so the artifact cannot be written
+  // unredacted. See `redactSecretValues` for what is left intact, and why.
+  const redacted = redactSecretValues(spec, secretValues);
 
   try {
-    await artifactClient.uploadArtifact("compose-spec", [path], ".", {
-      retentionDays: 30,
-    });
-  } catch (cause) {
-    const message = cause instanceof Error ? cause.message : String(cause);
-    throw new Error(`Failed to upload compose spec artifact: ${message}`, {
-      cause,
-    });
+    try {
+      await writeFile(path, JSON.stringify(redacted, null, 2));
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : String(cause);
+      throw new Error(`Failed to write compose spec to file: ${message}`, {
+        cause,
+      });
+    }
+
+    try {
+      await artifactClient.uploadArtifact("compose-spec", [path], ".", {
+        retentionDays: 30,
+      });
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : String(cause);
+      throw new Error(`Failed to upload compose spec artifact: ${message}`, {
+        cause,
+      });
+    }
+  } finally {
+    await removeFileQuietly(path, "temporary compose spec file");
   }
 }

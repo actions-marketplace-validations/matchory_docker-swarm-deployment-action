@@ -66,7 +66,6 @@ export async function normalizeStackSpecification(
     spec = load(content, {
       filename: "docker-compose.yaml",
       json: true,
-      onWarning: (error) => core.warning(error),
     }) as ComposeSpec;
   } catch (cause) {
     throw new Error(
@@ -86,6 +85,31 @@ export async function normalizeStackSpecification(
   }
 
   return spec;
+}
+
+/**
+ * Check whether the Docker Compose v2 plugin (`docker compose`) is available.
+ */
+export async function isComposePluginAvailable(): Promise<boolean> {
+  try {
+    await executeDockerCommand(["compose", "version"], { silent: true });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Merge compose files with `docker compose config`, which honors the
+ * `!reset` / `!override` merge tags that `docker stack config` ignores.
+ * `--no-interpolate` preserves `${VAR}` for the action's own interpolation.
+ */
+export async function mergeComposeFiles(files: string[]): Promise<string> {
+  const fileFlags = files.flatMap((file) => ["--file", file]);
+  return executeDockerCommand(
+    ["compose", ...fileFlags, "config", "--no-interpolate"],
+    { silent: true },
+  );
 }
 
 type ServiceFilters = {
@@ -152,26 +176,31 @@ export async function inspectService(id: string) {
     { silent: true },
   );
 
+  let result: Service | Service[];
+
   try {
-    const result = JSON.parse(output) as Service | Service[];
-
-    if (Array.isArray(result)) {
-      if (result.length === 0) {
-        throw new Error(`Service "${id}" not found`);
-      }
-
-      return result[0];
-    }
-
-    return result;
+    result = JSON.parse(output) as Service | Service[];
   } catch (cause) {
     throw new Error(
-      `Failed to inspect service ${id}: Failed to parse JSON output. ` +
-        "This is most likely a bug in the deployment action. Please report " +
-        "it to the action issues.",
+      `Failed to inspect service "${id}": Docker returned output that could ` +
+        "not be parsed as JSON. This is most likely a bug in the deployment " +
+        "action. Please report it to the action issues.",
       { cause },
     );
   }
+
+  if (Array.isArray(result)) {
+    if (result.length === 0) {
+      throw new Error(
+        `Service "${id}" was not found on the Swarm. It may have been ` +
+          "removed, or the deployment may not have created it.",
+      );
+    }
+
+    return result[0];
+  }
+
+  return result;
 }
 
 export type TaskStatus = {

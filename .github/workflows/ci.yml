@@ -19,13 +19,13 @@ jobs:
     steps:
       - name: Checkout
         id: checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: "false"
 
       - name: Setup Node.js
         id: setup-node
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .node-version
           cache: npm
@@ -33,6 +33,21 @@ jobs:
       - name: Install Dependencies
         id: npm-ci
         run: npm ci
+
+      # Formatting and linting run here, on the Biome version package.json
+      # pins, rather than in super-linter, which bundles its own. See
+      # linter.yml for why the two must not both check TypeScript.
+      - name: Format
+        id: npm-format-check
+        run: npm run format:check
+
+      - name: Lint
+        id: npm-lint
+        run: npm run lint
+
+      - name: Typecheck
+        id: npm-typecheck
+        run: npm run typecheck
 
       - name: Test
         id: npm-ci-test

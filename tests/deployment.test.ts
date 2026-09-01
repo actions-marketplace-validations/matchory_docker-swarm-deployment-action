@@ -53,12 +53,15 @@ describe("Deployment", () => {
       ]);
       vi.spyOn(compose, "loadComposeSpecs").mockResolvedValue([
         {
-          name: "foo",
-          services: {
-            web: {
-              image: "nginx:latest",
+          spec: {
+            name: "foo",
+            services: {
+              web: {
+                image: "nginx:latest",
+              },
             },
           },
+          baseDir: ".",
         },
       ]);
       vi.spyOn(compose, "normalizeSpec").mockResolvedValue({
@@ -79,6 +82,7 @@ describe("Deployment", () => {
       });
       vi.spyOn(engine, "deployStack").mockResolvedValue(undefined);
       vi.spyOn(variables, "pruneVariables").mockResolvedValue(undefined);
+      vi.spyOn(variables, "removeGeneratedVariableFiles").mockResolvedValue();
 
       await deploy(settings);
 
@@ -90,12 +94,15 @@ describe("Deployment", () => {
       expect(compose.normalizeSpec).toHaveBeenCalledWith(
         [
           {
-            name: "foo",
-            services: {
-              web: {
-                image: "nginx:latest",
+            spec: {
+              name: "foo",
+              services: {
+                web: {
+                  image: "nginx:latest",
+                },
               },
             },
+            baseDir: ".",
           },
         ],
         settings,
@@ -134,6 +141,7 @@ describe("Deployment", () => {
         },
         settings,
       );
+      expect(variables.removeGeneratedVariableFiles).toHaveBeenCalled();
     });
 
     it("should monitor the deployed services post-deployment if enabled", async () => {
@@ -166,12 +174,15 @@ describe("Deployment", () => {
       ]);
       vi.spyOn(compose, "loadComposeSpecs").mockResolvedValue([
         {
-          name: "foo",
-          services: {
-            web: {
-              image: "nginx:latest",
+          spec: {
+            name: "foo",
+            services: {
+              web: {
+                image: "nginx:latest",
+              },
             },
           },
+          baseDir: ".",
         },
       ]);
       vi.spyOn(compose, "normalizeSpec").mockResolvedValue({
@@ -196,12 +207,15 @@ describe("Deployment", () => {
       expect(compose.normalizeSpec).toHaveBeenCalledWith(
         [
           {
-            name: "foo",
-            services: {
-              web: {
-                image: "nginx:latest",
+            spec: {
+              name: "foo",
+              services: {
+                web: {
+                  image: "nginx:latest",
+                },
               },
             },
+            baseDir: ".",
           },
         ],
         settings,
@@ -236,6 +250,49 @@ describe("Deployment", () => {
         },
         settings,
       );
+    });
+  });
+
+  describe("Generated Variable Files", () => {
+    const settings = defineSettings({
+      envVarPrefix: "",
+      keyInterpolation: false,
+      manageVariables: true,
+      monitor: false,
+      monitorInterval: 0,
+      monitorTimeout: 0,
+      stack: "test-stack",
+      strictVariables: false,
+      variables: new Map(),
+      version: "1.2.3",
+    });
+
+    const spec = {
+      version: "3.8",
+      services: { web: { image: "nginx:latest" } },
+    };
+
+    beforeEach(() => {
+      vi.spyOn(compose, "resolveComposeFiles").mockResolvedValue([
+        "docker-compose.yaml",
+      ]);
+      vi.spyOn(compose, "loadComposeSpecs").mockResolvedValue([
+        { spec, baseDir: "." },
+      ]);
+      vi.spyOn(compose, "normalizeSpec").mockResolvedValue(spec);
+      vi.spyOn(compose, "interpolateSpec").mockReturnValue(spec);
+      vi.spyOn(variables, "removeGeneratedVariableFiles").mockResolvedValue(
+        undefined,
+      );
+    });
+
+    it("should remove them when the deployment fails", async () => {
+      vi.spyOn(engine, "deployStack").mockRejectedValue(
+        new Error("Deployment failed"),
+      );
+
+      await expect(deploy(settings)).rejects.toThrowError("Deployment failed");
+      expect(variables.removeGeneratedVariableFiles).toHaveBeenCalled();
     });
   });
 });

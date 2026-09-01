@@ -1,0 +1,62 @@
+# In TypeScript actions, `dist/` is committed and run directly. This workflow
+# rebuilds it and fails if the committed `dist/` is out of sync with `src/`,
+# preventing stale bundles from shipping.
+
+name: Check dist/
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  check-dist:
+    name: Check dist/
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        id: checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: "false"
+
+      - name: Setup Node.js
+        id: setup-node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .node-version
+          cache: npm
+
+      - name: Install Dependencies
+        id: npm-ci
+        run: npm ci
+
+      - name: Build dist/
+        id: build
+        run: npm run package
+
+      - name: Compare Directories
+        id: diff
+        run: |
+          if [ "$(git diff --ignore-space-at-eol --text dist/ | wc -l)" -gt 0 ]; then
+            echo "Detected uncommitted changes after build. See diff below:"
+            git diff --ignore-space-at-eol --text dist/
+            exit 1
+          fi
+
+      # If dist/ was different from expected, upload the actual version as an
+      # artifact so it can be inspected or used to update the committed copy.
+      - name: Upload Artifact
+        id: upload
+        if: ${{ failure() && steps.diff.conclusion == 'failure' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dist
+          path: dist/
